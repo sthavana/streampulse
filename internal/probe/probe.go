@@ -32,6 +32,8 @@ type plState struct {
 	lastSequence  int
 	lastSeqChange time.Time
 	lastEdge      *time.Time // projected live edge, not the raw PDT anchor tag
+	lastKeyID     string
+	lastKeyChange time.Time
 }
 
 func New(reg *metrics.Registry, n alert.Notifier) *Prober {
@@ -112,6 +114,9 @@ func (p *Prober) probeMedia(ctx context.Context, t config.Target, mediaURL, vari
 	p.reg.SetGauge("streampulse_segment_count", "Segment count in the current playlist", float64(len(pl.Segments)), labels)
 
 	for _, f := range p.runChecks(t, mediaURL, variant, pl) {
+		p.record(f)
+	}
+	for _, f := range p.keyChecks(ctx, t, mediaURL, variant, pl) {
 		p.record(f)
 	}
 

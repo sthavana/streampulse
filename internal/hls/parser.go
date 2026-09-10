@@ -77,6 +77,9 @@ func (r Rendition) Label() string {
 type MasterPlaylist struct {
 	Variants   []Variant
 	Renditions []Rendition
+	// SessionKeys are EXT-X-SESSION-KEY tags, which let a player fetch a
+	// licence before it has chosen a variant.
+	SessionKeys []Key
 }
 
 // RenditionGroups indexes renditions by (type, group id), the pair a variant
@@ -90,11 +93,13 @@ func (m *MasterPlaylist) RenditionGroups() map[string][]Rendition {
 }
 
 // Segment is one media segment reference in a media playlist.
+// Key is the EXT-X-KEY in force for this segment, or nil if it is in the clear.
 type Segment struct {
 	URI             string
 	Duration        float64
 	ProgramDateTime *time.Time
 	Discontinuity   bool
+	Key             *Key
 }
 
 // MediaPlaylist is the parsed media (variant) playlist.
@@ -104,6 +109,49 @@ type MediaPlaylist struct {
 	MediaSequence  int
 	EndList        bool
 	Segments       []Segment
+	// Keys holds every EXT-X-KEY tag in the order it appeared, including
+	// METHOD=NONE tags, which are meaningful: they mark a return to clear.
+	Keys []Key
+}
+
+// DistinctKeys returns the unique encrypting keys referenced by the playlist,
+// identified by method, URI and format. Used to spot key rotation.
+func (m *MediaPlaylist) DistinctKeys() []Key {
+	var out []Key
+	seen := map[string]bool{}
+	for _, k := range m.Keys {
+		if !k.Encrypted() {
+			continue
+		}
+		id := k.Method + "|" + k.URI + "|" + k.KeyFormat
+		if seen[id] {
+			continue
+		}
+		seen[id] = true
+		out = append(out, k)
+	}
+	return out
+}
+
+// Encrypted reports whether any segment in the window is encrypted.
+func (m *MediaPlaylist) Encrypted() bool {
+	for _, s := range m.Segments {
+		if s.Key != nil {
+			return true
+		}
+	}
+	return false
+}
+
+// ClearSegments counts segments carrying no key.
+func (m *MediaPlaylist) ClearSegments() int {
+	n := 0
+	for _, s := range m.Segments {
+		if s.Key == nil {
+			n++
+		}
+	}
+	return n
 }
 
 // Duration returns the sum of segment durations (the length of the live/DVR window).
@@ -153,6 +201,11 @@ func ParseMaster(raw string) *MasterPlaylist {
 			pending = &v
 			continue
 		}
+		if strings.HasPrefix(line, "#EXT-X-SESSION-KEY:") {
+			mp.SessionKeys = append(mp.SessionKeys,
+				parseKey(parseAttributes(strings.TrimPrefix(line, "#EXT-X-SESSION-KEY:"))))
+			continue
+		}
 		if strings.HasPrefix(line, "#EXT-X-MEDIA:") {
 			attrs := parseAttributes(strings.TrimPrefix(line, "#EXT-X-MEDIA:"))
 			mp.Renditions = append(mp.Renditions, Rendition{
@@ -190,6 +243,9 @@ func ParseMedia(raw string) *MediaPlaylist {
 		pendingPDT  *time.Time
 		pendingDisc bool
 		haveInf     bool
+		// An EXT-X-KEY applies to every segment that follows it, until the
+		// next EXT-X-KEY. METHOD=NONE clears it.
+		currentKey *Key
 	)
 	for _, line := range strings.Split(raw, "\n") {
 		line = strings.TrimSpace(line)
@@ -205,6 +261,15 @@ func ParseMedia(raw string) *MediaPlaylist {
 			pl.Version = atoiSafe(strings.TrimPrefix(line, "#EXT-X-VERSION:"))
 		case line == "#EXT-X-ENDLIST":
 			pl.EndList = true
+		case strings.HasPrefix(line, "#EXT-X-KEY:"):
+			k := parseKey(parseAttributes(strings.TrimPrefix(line, "#EXT-X-KEY:")))
+			pl.Keys = append(pl.Keys, k)
+			if k.Encrypted() {
+				kc := k
+				currentKey = &kc
+			} else {
+				currentKey = nil
+			}
 		case line == "#EXT-X-DISCONTINUITY":
 			pendingDisc = true
 		case strings.HasPrefix(line, "#EXT-X-PROGRAM-DATE-TIME:"):
@@ -229,6 +294,7 @@ func ParseMedia(raw string) *MediaPlaylist {
 					Duration:        pendingDur,
 					ProgramDateTime: pendingPDT,
 					Discontinuity:   pendingDisc,
+					Key:             currentKey,
 				})
 				pendingDur, pendingPDT, pendingDisc, haveInf = 0, nil, false, false
 			}

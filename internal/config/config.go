@@ -23,6 +23,11 @@ type Target struct {
 	SegmentSample   int      `json:"segment_sample"`     // segments per variant to fetch-check (0 = none)
 	ExpectLive      bool     `json:"expect_live"`        // flag if an ENDLIST appears
 	MinWindowSec    float64  `json:"min_window_seconds"` // warn if live window shorter than this (0 = skip)
+
+	// DRM / EXT-X-KEY.
+	ExpectEncrypted   bool `json:"expect_encrypted"`         // flag any segment served in the clear
+	FetchKeys         bool `json:"fetch_keys"`               // retrieve key URIs to prove availability
+	KeyRotationMaxSec int  `json:"key_rotation_max_seconds"` // warn if the key has not rotated (0 = skip)
 }
 
 // Alerting tunes the incident lifecycle: how findings are deduplicated into

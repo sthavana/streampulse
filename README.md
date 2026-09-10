@@ -44,6 +44,13 @@ against alternative audio and subtitle tracks as well as the video ladder.
 | `rendition_duplicate_name` | warning | Two renditions in one group share a `NAME` (RFC 8216 4.3.4.1.1) |
 | `rendition_multiple_default` | warning | More than one `DEFAULT=YES` in a group |
 | `closed_captions_with_uri` | warning | `CLOSED-CAPTIONS` rendition carries a `URI`, which the spec forbids |
+| `unexpected_clear_segments` | critical | Segments with no `EXT-X-KEY` on a stream declared encrypted |
+| `key_fetch` | critical | Key URI unreachable or non-200 |
+| `key_size_invalid` | critical | Identity key URI returned something other than 16 bytes |
+| `key_missing_uri` | critical | `EXT-X-KEY` with a method but no `URI` |
+| `key_invalid_iv` | warning | `IV` is not `0x` + 32 hex digits |
+| `key_rotation_stalled` | warning | Key unchanged for longer than the expected rotation interval |
+| `pssh_malformed` / `pssh_empty` | warning | Embedded PSSH box fails to parse or carries nothing |
 | `discontinuity_present` | info | Discontinuity markers in window (ad-break awareness) |
 
 Each finding is also counted in `streampulse_findings_total{check,severity,...}`.
@@ -82,6 +89,46 @@ Two per-target knobs, both optional:
 
 `rendition_types` is the one to reach for on a stream carrying thirty subtitle
 languages you do not need to probe every few seconds.
+
+## DRM and EXT-X-KEY
+
+Key problems are among the most expensive stream failures: playback stops dead
+for every viewer at once, and the manifest and segments all look fine.
+StreamPulse parses `EXT-X-KEY` and `EXT-X-SESSION-KEY`, tracks which key
+applies to which segment, and optionally proves the key is actually retrievable.
+
+```json
+"expect_encrypted": true,
+"fetch_keys": true,
+"key_rotation_max_seconds": 3600
+```
+
+**`expect_encrypted`** catches clear-lead leakage: segments going out
+unprotected on a stream that is supposed to be encrypted. Nothing 404s and the
+stream plays perfectly, which is exactly why it goes unnoticed. `METHOD=NONE`
+is parsed as what it is -- a deliberate return to clear -- so a mid-playlist
+switch is detected rather than ignored.
+
+**`fetch_keys`** retrieves each distinct key URI, as a player would. For an
+`identity` KEYFORMAT (plain AES-128) the response must be exactly 16 bytes; a
+key endpoint serving an HTML error page with HTTP 200 is a real failure mode
+that a reachability check alone would pass.
+
+> Key material is never written to a finding, a log line, or a notification.
+> Findings carry the URI, the DRM system, and byte counts only.
+
+Not every key URI is an HTTP resource, and those are skipped rather than
+reported as failures: FairPlay uses `skd://`, and Widevine and PlayReady
+usually embed initialisation data in a `data:` URI. Embedded payloads carrying
+a `pssh` box are parsed and validated (system ID, KIDs, size fields); a payload
+that is *not* a PSSH box is left alone, because PlayReady commonly ships a bare
+PlayReady Object and flagging it would be a false positive.
+
+Relative key URIs (`URI="key.bin"`) resolve against the media playlist, which
+is how most packagers write them.
+
+**`key_rotation_max_seconds`** flags a live stream whose keys have stopped
+rotating. It is opt-in because plenty of streams legitimately never rotate.
 
 ## Alerting: incidents, not findings
 
@@ -172,6 +219,8 @@ matches is worse than one that refuses to load.
 `streampulse_segment_available`, `streampulse_segment_ttfb_seconds`,
 `streampulse_variant_count`, `streampulse_rendition_count`,
 `streampulse_findings_total`,
+`streampulse_key_count`, `streampulse_key_available`,
+`streampulse_key_fetch_seconds`,
 `streampulse_incident_active`, `streampulse_incidents_opened_total`,
 `streampulse_incidents_resolved_total`, `streampulse_maintenance_active`,
 `streampulse_notifications_suppressed_total`.
@@ -239,7 +288,6 @@ exposition), `alert` (findings + notifiers), `config` (targets).
 - **DASH** MPD parsing (`$Number$`/`$Time$` templates, multi-period, availability window)
 - **MPEG-TS / IPTV**: TR 101 290 P1/P2/P3-style checks (PCR jitter, CC errors, PAT/PMT integrity) via TSDuck
 - **Deep segment inspection**: decode a frame (ffprobe) for black/freeze, codec/res vs declared, PTS continuity
-- **DRM**: license-server reachability, key rotation gaps, PSSH sanity
 - **Multi-vantage probing** (run from several regions; compare)
 - **Cross-layer correlation**: map a QoE symptom to the offending layer
 - **Web UI** over the incident state the tracker already keeps

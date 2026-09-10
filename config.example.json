@@ -39,7 +39,10 @@
       "rendition_types": ["AUDIO"],
       "segment_sample": 2,
       "expect_live": true,
-      "min_window_seconds": 30
+      "min_window_seconds": 30,
+      "expect_encrypted": true,
+      "fetch_keys": true,
+      "key_rotation_max_seconds": 3600
     }
   ]
 }
