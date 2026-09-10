@@ -1,6 +1,12 @@
 {
   "metrics_addr": ":9090",
   "slack_webhook": "",
+  "alerting": {
+    "for_seconds": 0,
+    "resolve_after_seconds": 90,
+    "repeat_every_seconds": 0,
+    "sweep_seconds": 10
+  },
   "targets": [
     {
       "name": "apple-bipbop-fmp4",

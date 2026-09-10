@@ -40,13 +40,49 @@ existing Prometheus + Grafana + Alertmanager stack.
 
 Each finding is also counted in `streampulse_findings_total{check,severity,...}`.
 
+## Alerting: incidents, not findings
+
+A prober re-observes a fault on every poll. Sent straight to Slack, one frozen
+playlist on a 4s interval is ~900 messages an hour, and a channel that noisy
+gets muted -- which is the actual failure mode behind most alert fatigue.
+
+Findings are therefore deduplicated into **incidents**, keyed by
+`(target, variant, check)`. You get one notification when an incident opens and
+one when it clears, regardless of how many polls observed it in between. The
+message is kept fresh from the latest observation but is deliberately not part
+of the key, so a check like `segment_availability` naming a different segment
+URI each poll still collapses to one incident.
+
+```json
+"alerting": {
+  "for_seconds": 0,            // condition must persist this long before notifying
+  "resolve_after_seconds": 90, // quiet period before an incident is declared cleared
+  "repeat_every_seconds": 0,   // re-notify while still firing; 0 = off
+  "sweep_seconds": 10          // how often expiry is checked
+}
+```
+
+`for_seconds` is the flap damper: raise it and a transient CDN 404 that clears
+on the next poll is never announced at all. It trades that much detection
+latency for silence, so it is 0 by default.
+
+Resolution is by expiry rather than by observing a clean evaluation, because a
+probe that fails early (an unreachable manifest) never evaluates the downstream
+playlist checks that cycle -- "evaluated and clean" would wrongly clear them.
+
+Incident state is exported too: `streampulse_incident_active` is 1 while firing
+and 0 once cleared, alongside `streampulse_incidents_opened_total` and
+`streampulse_incidents_resolved_total`.
+
 ## Metrics exposed (`/metrics`)
 
 `streampulse_probe_up`, `streampulse_variant_up`, `streampulse_manifest_fetch_seconds`,
 `streampulse_media_fetch_seconds`, `streampulse_media_sequence`,
 `streampulse_playlist_window_seconds`, `streampulse_segment_count`,
 `streampulse_segment_available`, `streampulse_segment_ttfb_seconds`,
-`streampulse_variant_count`, `streampulse_findings_total`.
+`streampulse_variant_count`, `streampulse_findings_total`,
+`streampulse_incident_active`, `streampulse_incidents_opened_total`,
+`streampulse_incidents_resolved_total`.
 
 ## Quickstart
 
@@ -80,10 +116,15 @@ and now redirects to an HTML page -- StreamPulse flags it as
              +----+---------------+----+
                   |               |
         findings  |               |  metrics
-         +--------v-----+   +-----v---------+
-         | alert.Notifier|  | metrics.Registry|
-         |  JSON / Slack |  |  /metrics (Prom)|
-         +--------------+   +----------------+
+       +---------v---------+ +-----v---------+
+       |  alert.Tracker    | | metrics.Registry|
+       | dedup -> incident | |  /metrics (Prom)|
+       +---------+---------+ +----------------+
+                 | open / resolve only
+         +-------v------+
+         | alert.Notifier|
+         |  JSON / Slack |
+         +--------------+
 ```
 
 Packages: `hls` (parser), `probe` (prober + checks), `metrics` (Prometheus
@@ -109,7 +150,8 @@ exposition), `alert` (findings + notifiers), `config` (targets).
 - **DRM**: license-server reachability, key rotation gaps, PSSH sanity
 - **Multi-vantage probing** (run from several regions; compare)
 - **Cross-layer correlation**: map a QoE symptom to the offending layer
-- **Web UI + alert dedup / maintenance windows** to keep false positives low
+- **Maintenance windows** to suppress alerting during planned work
+- **Web UI** over the incident state the tracker already keeps
 
 ## Status
 

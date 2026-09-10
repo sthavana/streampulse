@@ -20,14 +20,28 @@ const (
 	Critical Severity = "critical"
 )
 
-// Finding is a single health observation about a target/variant.
+// Status distinguishes an incident that is currently firing from one that has
+// cleared. The prober emits bare observations; the Tracker stamps a status on
+// the ones it decides are worth telling a human about.
+type Status string
+
+const (
+	Firing   Status = "firing"
+	Resolved Status = "resolved"
+)
+
+// Finding is a single health observation about a target/variant. The last three
+// fields are filled in by the Tracker when a finding becomes a notification.
 type Finding struct {
-	Time     time.Time `json:"time"`
-	Target   string    `json:"target"`
-	Variant  string    `json:"variant,omitempty"`
-	Check    string    `json:"check"`
-	Severity Severity  `json:"severity"`
-	Message  string    `json:"message"`
+	Time      time.Time  `json:"time"`
+	Target    string     `json:"target"`
+	Variant   string     `json:"variant,omitempty"`
+	Check     string     `json:"check"`
+	Severity  Severity   `json:"severity"`
+	Message   string     `json:"message"`
+	Status    Status     `json:"status,omitempty"`
+	Count     int        `json:"count,omitempty"`
+	FirstSeen *time.Time `json:"first_seen,omitempty"`
 }
 
 // Notifier delivers findings somewhere.
@@ -64,7 +78,11 @@ func (s *SlackNotifier) Notify(f Finding) {
 	if f.Severity == Info {
 		return
 	}
-	text := "[" + string(f.Severity) + "] " + f.Target
+	tag := string(f.Severity)
+	if f.Status == Resolved {
+		tag = "resolved"
+	}
+	text := "[" + tag + "] " + f.Target
 	if f.Variant != "" {
 		text += " (" + f.Variant + ")"
 	}

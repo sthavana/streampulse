@@ -38,7 +38,15 @@ func main() {
 		notifier = alert.Multi(notifier, alert.NewSlackNotifier(cfg.SlackWebhook))
 	}
 
-	pr := probe.New(reg, notifier)
+	// Every finding goes through the tracker, so a fault re-observed on each
+	// poll is announced once when it opens and once when it clears.
+	tracker := alert.NewTracker(alert.TrackerConfig{
+		For:          cfg.Alerting.For(),
+		ResolveAfter: cfg.Alerting.ResolveAfter(),
+		RepeatEvery:  cfg.Alerting.Repeat(),
+	}, notifier, reg)
+
+	pr := probe.New(reg, tracker)
 
 	mux := http.NewServeMux()
 	mux.Handle("/metrics", reg.Handler())
@@ -55,6 +63,12 @@ func main() {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	var wg sync.WaitGroup
+
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		runSweeper(ctx, tracker, cfg.Alerting.Sweep())
+	}()
 	for _, t := range cfg.Targets {
 		wg.Add(1)
 		go func(t config.Target) {
@@ -73,6 +87,21 @@ func main() {
 	defer sc()
 	_ = srv.Shutdown(shutdownCtx)
 	wg.Wait()
+}
+
+// runSweeper drives incident expiry: it is the only path that emits a resolved
+// notification, so it has to keep running even when every target is healthy.
+func runSweeper(ctx context.Context, tr *alert.Tracker, every time.Duration) {
+	ticker := time.NewTicker(every)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			tr.Sweep()
+		}
+	}
 }
 
 func runTarget(ctx context.Context, pr *probe.Prober, t config.Target) {
