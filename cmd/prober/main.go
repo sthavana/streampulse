@@ -12,9 +12,14 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
+
+	// Embed the timezone database so maintenance windows resolve their
+	// location on hosts without system tzdata, such as a scratch container.
+	_ "time/tzdata"
 
 	"streampulse/internal/alert"
 	"streampulse/internal/config"
@@ -45,6 +50,15 @@ func main() {
 		ResolveAfter: cfg.Alerting.ResolveAfter(),
 		RepeatEvery:  cfg.Alerting.Repeat(),
 	}, notifier, reg)
+
+	schedule, err := cfg.Schedule()
+	if err != nil {
+		log.Fatalf("maintenance: %v", err)
+	}
+	tracker.SetSchedule(schedule)
+	for _, w := range schedule {
+		log.Printf("maintenance window configured: %q targets=%v checks=%v", w.Name, scopeOrAll(w.Targets), scopeOrAll(w.Checks))
+	}
 
 	pr := probe.New(reg, tracker)
 
@@ -87,6 +101,14 @@ func main() {
 	defer sc()
 	_ = srv.Shutdown(shutdownCtx)
 	wg.Wait()
+}
+
+// scopeOrAll renders an empty scope as the wildcard it actually is.
+func scopeOrAll(s []string) string {
+	if len(s) == 0 {
+		return "<all>"
+	}
+	return strings.Join(s, ",")
 }
 
 // runSweeper drives incident expiry: it is the only path that emits a resolved

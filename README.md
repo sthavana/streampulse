@@ -74,6 +74,53 @@ Incident state is exported too: `streampulse_incident_active` is 1 while firing
 and 0 once cleared, alongside `streampulse_incidents_opened_total` and
 `streampulse_incidents_resolved_total`.
 
+## Maintenance windows
+
+Planned work should not page anyone. Windows suppress alerting for a scope you
+choose, either recurring or one-off:
+
+```json
+"maintenance": [
+  {
+    "name": "nightly encoder restart",
+    "targets": ["channel-1"],          // omit for all targets
+    "checks": ["playlist_stalled"],    // omit for all checks
+    "timezone": "America/Los_Angeles",
+    "daily": { "start": "02:00", "end": "04:00", "days": ["Sat", "Sun"] }
+  },
+  {
+    "name": "packager upgrade",
+    "start": "2026-09-15T22:00:00Z",
+    "end": "2026-09-16T02:00:00Z"
+  }
+]
+```
+
+Windows are expressed in wall-clock time in their own `timezone` (default UTC),
+so a 02:00 window stays at 02:00 local across a DST change rather than drifting
+an hour. `daily` windows may cross midnight (`22:00`-`02:00`); when they do,
+`days` refers to the day the window *opened*, so a Saturday window covers Sunday
+01:00. The timezone database is embedded in the binary, so this works on a
+scratch container with no system tzdata.
+
+What suppression does and does not do:
+
+- A fault that opens **and** clears entirely inside a window is never announced.
+- A fault that opens inside a window and is **still open when the window closes**
+  is announced then, carrying its full observation count -- so an operator can
+  see it did not just start. This is the "did I break something?" case, and it
+  is why findings are still tracked rather than dropped.
+- A **resolve** for an incident announced *before* the window is always
+  delivered, even mid-window. A resolve is never a page, and withholding it
+  would leave someone believing a fault they were told about is still open.
+
+Suppression is deliberately visible rather than silent:
+`streampulse_maintenance_active{window}` is 1 while a window is open, and
+`streampulse_notifications_suppressed_total{window,target,check}` counts what
+was withheld. A malformed window (bad timezone, bad clock, both forms at once)
+fails at startup rather than being ignored -- a window that silently never
+matches is worse than one that refuses to load.
+
 ## Metrics exposed (`/metrics`)
 
 `streampulse_probe_up`, `streampulse_variant_up`, `streampulse_manifest_fetch_seconds`,
@@ -82,7 +129,8 @@ and 0 once cleared, alongside `streampulse_incidents_opened_total` and
 `streampulse_segment_available`, `streampulse_segment_ttfb_seconds`,
 `streampulse_variant_count`, `streampulse_findings_total`,
 `streampulse_incident_active`, `streampulse_incidents_opened_total`,
-`streampulse_incidents_resolved_total`.
+`streampulse_incidents_resolved_total`, `streampulse_maintenance_active`,
+`streampulse_notifications_suppressed_total`.
 
 ## Quickstart
 
@@ -150,7 +198,6 @@ exposition), `alert` (findings + notifiers), `config` (targets).
 - **DRM**: license-server reachability, key rotation gaps, PSSH sanity
 - **Multi-vantage probing** (run from several regions; compare)
 - **Cross-layer correlation**: map a QoE symptom to the offending layer
-- **Maintenance windows** to suppress alerting during planned work
 - **Web UI** over the incident state the tracker already keeps
 
 ## Status

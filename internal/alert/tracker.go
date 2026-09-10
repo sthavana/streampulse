@@ -38,11 +38,17 @@ type Metrics interface {
 }
 
 type incident struct {
-	last       Finding // most recent observation, for its message
-	firstSeen  time.Time
-	lastSeen   time.Time
-	count      int
-	firing     bool
+	last      Finding // most recent observation, for its message
+	firstSeen time.Time
+	lastSeen  time.Time
+	count     int
+
+	// open means the condition has persisted past For and is a real incident.
+	// announced means a human was actually told about it. They differ during a
+	// maintenance window: the incident is tracked but stays quiet, and is
+	// announced later if it is still open when the window closes.
+	open       bool
+	announced  bool
 	notifiedAt time.Time
 }
 
@@ -60,10 +66,19 @@ type Tracker struct {
 	mu        sync.Mutex
 	incidents map[string]*incident
 
-	out Notifier
-	mx  Metrics
-	cfg TrackerConfig
-	now func() time.Time
+	out      Notifier
+	mx       Metrics
+	cfg      TrackerConfig
+	schedule Schedule
+	now      func() time.Time
+}
+
+// SetSchedule installs the maintenance windows during which alerting is
+// suppressed. Safe to call before the prober starts.
+func (t *Tracker) SetSchedule(s Schedule) {
+	t.mu.Lock()
+	t.schedule = s
+	t.mu.Unlock()
 }
 
 // NewTracker wraps out. mx may be nil.
@@ -94,15 +109,49 @@ func (t *Tracker) Notify(f Finding) {
 // The caller drives it on a ticker; it is the only path that emits Resolved.
 func (t *Tracker) Sweep() {
 	t.publish(t.expire()...)
+	t.refreshWindowGauges()
 }
 
-// Active reports how many incidents are currently firing.
+// refreshWindowGauges publishes which maintenance windows are open right now.
+func (t *Tracker) refreshWindowGauges() {
+	if t.mx == nil {
+		return
+	}
+	t.mu.Lock()
+	sched, now := t.schedule, t.now()
+	t.mu.Unlock()
+
+	for _, w := range sched {
+		v := 0.0
+		if w.Active(now) {
+			v = 1
+		}
+		t.mx.SetGauge("streampulse_maintenance_active",
+			"1 while a maintenance window is open", v, map[string]string{"window": w.Name})
+	}
+}
+
+// Active reports how many incidents have been announced and not yet cleared.
 func (t *Tracker) Active() int {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	n := 0
 	for _, inc := range t.incidents {
-		if inc.firing {
+		if inc.announced {
+			n++
+		}
+	}
+	return n
+}
+
+// Tracking reports how many incidents are open, announced or not. During a
+// maintenance window this exceeds Active.
+func (t *Tracker) Tracking() int {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	n := 0
+	for _, inc := range t.incidents {
+		if inc.open {
 			n++
 		}
 	}
@@ -128,17 +177,45 @@ func (t *Tracker) observe(f Finding) []Finding {
 	inc.lastSeen = now
 	inc.count++
 
+	if !inc.open && now.Sub(inc.firstSeen) >= t.cfg.For {
+		inc.open = true
+	}
+	if !inc.open {
+		return nil
+	}
+
+	window, quiet := t.schedule.Suppressed(f, now)
+	if quiet {
+		t.suppressed(f, window)
+		return nil
+	}
+
 	switch {
-	case !inc.firing && now.Sub(inc.firstSeen) >= t.cfg.For:
-		inc.firing = true
+	case !inc.announced:
+		// Either this incident just opened, or it opened inside a maintenance
+		// window that has since closed while the fault persisted.
+		inc.announced = true
 		inc.notifiedAt = now
 		return []Finding{render(inc, Firing, now)}
 
-	case inc.firing && t.cfg.RepeatEvery > 0 && now.Sub(inc.notifiedAt) >= t.cfg.RepeatEvery:
+	case t.cfg.RepeatEvery > 0 && now.Sub(inc.notifiedAt) >= t.cfg.RepeatEvery:
 		inc.notifiedAt = now
 		return []Finding{render(inc, Firing, now)}
 	}
 	return nil
+}
+
+// suppressed counts a notification withheld by a maintenance window, so the
+// silence is visible on a dashboard rather than indistinguishable from health.
+// Called with the lock held; IncCounter takes its own.
+func (t *Tracker) suppressed(f Finding, window string) {
+	if t.mx == nil {
+		return
+	}
+	t.mx.IncCounter("streampulse_notifications_suppressed_total",
+		"Notifications withheld by a maintenance window", map[string]string{
+			"target": f.Target, "check": f.Check, "window": window,
+		})
 }
 
 func (t *Tracker) expire() []Finding {
@@ -151,9 +228,14 @@ func (t *Tracker) expire() []Finding {
 		if now.Sub(inc.lastSeen) < t.cfg.ResolveAfter {
 			continue
 		}
-		// An incident that never reached For was a blip: drop it silently
-		// rather than announce the clearing of something never announced.
-		if inc.firing {
+		// Only announce a clearing for something that was announced. A blip
+		// that never reached For, or one that opened and cleared entirely
+		// inside a maintenance window, is dropped silently.
+		//
+		// Note this is deliberately not gated on the schedule: a resolve is
+		// never a page, and withholding it would leave a human who was told
+		// about the fault believing it is still open.
+		if inc.announced {
 			out = append(out, render(inc, Resolved, now))
 		}
 		delete(t.incidents, key)
@@ -164,8 +246,10 @@ func (t *Tracker) expire() []Finding {
 // render turns incident state into the Finding that goes out to a notifier.
 func render(inc *incident, st Status, now time.Time) Finding {
 	f := inc.last
-	first := inc.firstSeen
-	f.Time = now
+	first := inc.firstSeen.UTC()
+	// Normalise to UTC: the prober stamps findings in UTC and the tracker
+	// must not reintroduce local time on the way out.
+	f.Time = now.UTC()
 	f.Status = st
 	f.Count = inc.count
 	f.FirstSeen = &first

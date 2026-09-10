@@ -348,3 +348,209 @@ func TestConcurrentObserveAndSweep(t *testing.T) {
 	}()
 	wg.Wait()
 }
+
+// --- maintenance window suppression ---
+
+// windowAround builds a schedule open for the whole test unless narrowed.
+func alwaysOpen(name string, targets, checks []string) Schedule {
+	return Schedule{{Name: name, Targets: targets, Checks: checks,
+		Loc: time.UTC, Daily: &Daily{StartMin: 0, EndMin: 1440}}}
+}
+
+func TestMaintenanceSuppressesOpenNotification(t *testing.T) {
+	tr, s, clk := newTracker(TrackerConfig{ResolveAfter: 90 * time.Second})
+	tr.SetSchedule(alwaysOpen("planned", nil, nil))
+
+	for i := 0; i < 20; i++ {
+		tr.Notify(obs("playlist_stalled"))
+		clk.advance(4 * time.Second)
+	}
+
+	if s.len() != 0 {
+		t.Fatalf("maintenance window did not suppress: %v", s.statuses())
+	}
+	// The incident is tracked even though nobody was told.
+	if tr.Tracking() != 1 {
+		t.Errorf("Tracking() = %d, want 1", tr.Tracking())
+	}
+	if tr.Active() != 0 {
+		t.Errorf("Active() = %d, want 0 while suppressed", tr.Active())
+	}
+}
+
+// The "did I break something?" case: a fault that starts during maintenance and
+// is still broken when the window closes must be announced then.
+func TestFaultStillBrokenWhenWindowClosesIsAnnounced(t *testing.T) {
+	tr, s, clk := newTracker(TrackerConfig{ResolveAfter: 90 * time.Second})
+
+	// Window covers 02:00-04:00 UTC; start the clock inside it.
+	tr.SetSchedule(Schedule{{Name: "upgrade", Loc: time.UTC,
+		Daily: &Daily{StartMin: 120, EndMin: 240}}})
+	clk.t = time.Date(2026, 1, 1, 3, 0, 0, 0, time.UTC)
+
+	for i := 0; i < 10; i++ { // still inside the window
+		tr.Notify(obs("playlist_stalled"))
+		clk.advance(4 * time.Second)
+	}
+	if s.len() != 0 {
+		t.Fatalf("notified inside the window: %v", s.statuses())
+	}
+
+	// Move past 04:00; the fault is still there.
+	clk.t = time.Date(2026, 1, 1, 4, 0, 1, 0, time.UTC)
+	tr.Notify(obs("playlist_stalled"))
+
+	if s.len() != 1 {
+		t.Fatalf("got %d notifications after the window closed, want 1: %v", s.len(), s.statuses())
+	}
+	f := s.at(0)
+	if f.Status != Firing {
+		t.Errorf("status = %q, want %q", f.Status, Firing)
+	}
+	// It carries the full history, so the operator sees it did not just start.
+	if f.Count != 11 {
+		t.Errorf("Count = %d, want 11 observations including the suppressed ones", f.Count)
+	}
+}
+
+// A fault that opens and clears entirely inside the window is never announced.
+func TestFaultOpeningAndClearingInsideWindowStaysSilent(t *testing.T) {
+	tr, s, clk := newTracker(TrackerConfig{ResolveAfter: 30 * time.Second})
+	tr.SetSchedule(alwaysOpen("planned", nil, nil))
+
+	for i := 0; i < 5; i++ {
+		tr.Notify(obs("playlist_stalled"))
+		clk.advance(4 * time.Second)
+	}
+	clk.advance(60 * time.Second) // fault clears, incident expires
+	tr.Sweep()
+
+	if s.len() != 0 {
+		t.Errorf("expected total silence, got: %v", s.statuses())
+	}
+	if tr.Tracking() != 0 {
+		t.Errorf("Tracking() = %d after expiry, want 0", tr.Tracking())
+	}
+}
+
+// A resolve for an already-announced incident is delivered even if a window
+// opened in the meantime: withholding it would leave the operator believing a
+// fault they were told about is still open.
+func TestResolveDeliveredEvenIfWindowOpensLater(t *testing.T) {
+	tr, s, clk := newTracker(TrackerConfig{ResolveAfter: 30 * time.Second})
+
+	tr.Notify(obs("playlist_stalled")) // announced, no window yet
+	if s.len() != 1 {
+		t.Fatalf("expected the open notification, got %v", s.statuses())
+	}
+
+	tr.SetSchedule(alwaysOpen("planned", nil, nil)) // maintenance starts
+	clk.advance(40 * time.Second)
+	tr.Sweep()
+
+	if s.len() != 2 {
+		t.Fatalf("got %d notifications, want 2: %v", s.len(), s.statuses())
+	}
+	if got := s.at(1).Status; got != Resolved {
+		t.Errorf("status = %q, want %q", got, Resolved)
+	}
+}
+
+func TestMaintenanceScopedToTargetLeavesOthersAlone(t *testing.T) {
+	tr, s, _ := newTracker(TrackerConfig{ResolveAfter: 90 * time.Second})
+	tr.SetSchedule(alwaysOpen("chan1 only", []string{"chan1"}, nil))
+
+	tr.Notify(obs("playlist_stalled")) // Target chan1: suppressed
+
+	other := obs("playlist_stalled")
+	other.Target = "chan2"
+	tr.Notify(other) // not covered: must alert
+
+	if s.len() != 1 {
+		t.Fatalf("got %d notifications, want 1 (chan2 only): %v", s.len(), s.statuses())
+	}
+	if got := s.at(0).Target; got != "chan2" {
+		t.Errorf("notified target = %q, want chan2", got)
+	}
+}
+
+func TestMaintenanceScopedToCheckLeavesOthersAlone(t *testing.T) {
+	tr, s, _ := newTracker(TrackerConfig{ResolveAfter: 90 * time.Second})
+	tr.SetSchedule(alwaysOpen("stall only", nil, []string{"playlist_stalled"}))
+
+	tr.Notify(obs("playlist_stalled"))     // suppressed
+	tr.Notify(obs("segment_availability")) // must alert
+
+	if s.len() != 1 {
+		t.Fatalf("got %d notifications, want 1: %v", s.len(), s.statuses())
+	}
+	if got := s.at(0).Check; got != "segment_availability" {
+		t.Errorf("notified check = %q, want segment_availability", got)
+	}
+}
+
+func TestSuppressionIsCounted(t *testing.T) {
+	mx := &fakeMetrics{gauges: map[string]float64{}, counters: map[string]int{}}
+	clk := &clock{t: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)}
+	tr := NewTracker(TrackerConfig{ResolveAfter: 90 * time.Second}, &sink{}, mx)
+	tr.SetClock(clk.now)
+	tr.SetSchedule(alwaysOpen("planned", nil, nil))
+
+	for i := 0; i < 5; i++ {
+		tr.Notify(obs("playlist_stalled"))
+		clk.advance(4 * time.Second)
+	}
+
+	got := mx.counters["streampulse_notifications_suppressed_total|playlist_stalled"]
+	if got != 5 {
+		t.Errorf("suppressed counter = %d, want 5", got)
+	}
+}
+
+func TestMaintenanceGaugePublishedOnSweep(t *testing.T) {
+	mx := &fakeMetrics{gauges: map[string]float64{}, counters: map[string]int{}}
+	clk := &clock{t: time.Date(2026, 1, 1, 3, 0, 0, 0, time.UTC)}
+	tr := NewTracker(TrackerConfig{ResolveAfter: 90 * time.Second}, &sink{}, mx)
+	tr.SetClock(clk.now)
+	tr.SetSchedule(Schedule{{Name: "nightly", Loc: time.UTC,
+		Daily: &Daily{StartMin: 120, EndMin: 240}}})
+
+	tr.Sweep() // 03:00, inside
+	if got := mx.gauges["streampulse_maintenance_active|"]; got != 1 {
+		t.Errorf("maintenance gauge = %v inside the window, want 1", got)
+	}
+
+	clk.t = time.Date(2026, 1, 1, 12, 0, 0, 0, time.UTC)
+	tr.Sweep() // midday, outside
+	if got := mx.gauges["streampulse_maintenance_active|"]; got != 0 {
+		t.Errorf("maintenance gauge = %v outside the window, want 0", got)
+	}
+}
+
+func TestNotificationTimestampsAreUTC(t *testing.T) {
+	la, err := time.LoadLocation("America/Los_Angeles")
+	if err != nil {
+		t.Skipf("tzdata unavailable: %v", err)
+	}
+	s := &sink{}
+	clk := &clock{t: time.Date(2026, 1, 1, 3, 0, 0, 0, la)}
+	tr := NewTracker(TrackerConfig{ResolveAfter: 30 * time.Second}, s, nil)
+	tr.SetClock(clk.now)
+
+	tr.Notify(obs("playlist_stalled"))
+	clk.advance(40 * time.Second)
+	tr.Sweep()
+
+	if s.len() != 2 {
+		t.Fatalf("got %d notifications, want 2", s.len())
+	}
+	for i := 0; i < 2; i++ {
+		f := s.at(i)
+		if f.Time.Location() != time.UTC {
+			t.Errorf("notification %d Time in %v, want UTC", i, f.Time.Location())
+		}
+		if f.FirstSeen == nil || f.FirstSeen.Location() != time.UTC {
+			t.Errorf("notification %d FirstSeen not UTC", i)
+		}
+	}
+}
