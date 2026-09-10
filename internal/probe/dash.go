@@ -39,6 +39,9 @@ func (p *Prober) probeDASH(ctx context.Context, t config.Target, raw string) {
 	// availability window is computed from it, so taking it once keeps the
 	// ladder consistent with itself even if the cycle takes a second or two.
 	now := p.now().UTC()
+	for _, f := range dashManifestChecks(now, t, m) {
+		p.record(f)
+	}
 	for _, r := range selectRepresentations(t, m) {
 		p.probeRepresentation(ctx, t, r, now)
 	}
@@ -64,6 +67,10 @@ func (p *Prober) probeRepresentation(ctx context.Context, t config.Target, r *da
 	last := segs[len(segs)-1]
 	p.reg.SetGauge("streampulse_media_sequence", helpSequence, float64(last.Number), labels)
 	p.reg.SetGauge("streampulse_playlist_window_seconds", helpWindow, (last.End() - segs[0].Start).Seconds(), labels)
+
+	for _, f := range p.dashRepChecks(now, t, edgeKey(t, variant), variant, r, segs) {
+		p.record(f)
+	}
 
 	if t.SegmentSample > 0 {
 		urls := make([]string, len(segs))

@@ -40,7 +40,15 @@ type Prober struct {
 	now      func() time.Time // injectable so the cross-poll checks are testable
 
 	mu    sync.Mutex
-	state map[string]*plState // keyed by media-playlist URL
+	state map[string]*plState   // keyed by media-playlist URL
+	edges map[string]*edgeState // keyed by target URL + representation label
+}
+
+// edgeState is the previous poll's view of one DASH representation's
+// manifest-declared live edge.
+type edgeState struct {
+	tick       int64
+	lastChange time.Time
 }
 
 type plState struct {
@@ -58,6 +66,7 @@ func New(reg *metrics.Registry, n alert.Notifier) *Prober {
 		notifier: n,
 		now:      time.Now,
 		state:    make(map[string]*plState),
+		edges:    make(map[string]*edgeState),
 	}
 }
 

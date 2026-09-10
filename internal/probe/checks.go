@@ -188,4 +188,6 @@ func maxInt(a, b int) int {
 
 func itoa(i int) string { return strconv.Itoa(i) }
 
+func i64toa(i int64) string { return strconv.FormatInt(i, 10) }
+
 func ftoa(f float64) string { return strconv.FormatFloat(f, 'f', 1, 64) }

@@ -137,8 +137,6 @@ parsed, every representation is enumerated, and the most recent segments of
 each are fetch-checked. Findings go through the same incidents, maintenance
 windows and metrics as the HLS path.
 
-What runs against DASH today is the availability half of the check table:
-
 | Check | Severity | What it catches |
 |---|---|---|
 | `manifest_fetch` | critical | Origin/CDN unreachable or non-200 |
@@ -146,10 +144,43 @@ What runs against DASH today is the availability half of the check table:
 | `manifest_empty` | warning | MPD parsed but declares no representations |
 | `no_segments` | critical | No segment is available in the current window |
 | `segment_availability` | critical | A segment the MPD points at 404s / errors |
+| `playlist_stalled` | critical | Timeline not advancing (frozen live edge) |
+| `playlist_rollback` | critical | Timeline went backwards (stale origin / failover) |
+| `short_window` | warning | Live/DVR window shorter than expected |
+| `unexpected_static` | critical | `type="static"` on a stream you declared live |
 
-The cross-poll and DRM rules -- `playlist_stalled`, `playlist_rollback`,
-`short_window`, the PDT family, `expect_encrypted` -- are still HLS-only. They
-port onto the same state machine and are the next piece of work.
+The DRM rules (`expect_encrypted` and the key family) are still HLS-only.
+
+### Where the freeze check applies, and why it does not always
+
+`playlist_stalled` compares the **manifest-declared** live edge across polls,
+and that is a narrower thing than it sounds:
+
+- On a **SegmentTimeline** the manifest states where the edge is. A packager
+  that stops publishing serves a byte-identical timeline on the next poll, so
+  the freeze is visible in the manifest and the check fires.
+- On a **number-addressed template** (`$Number$` with `@duration`) the manifest
+  states no such thing. It is a formula, and the client extrapolates the edge
+  from its own clock -- so a computed edge advances whether or not the packager
+  is still alive. Comparing it would be comparing our clock to itself. It could
+  never fire, which is worse than not checking: on a dashboard it would look
+  exactly like coverage.
+
+Those streams are not left uncovered, the coverage just lives somewhere else.
+The segment sample asks the CDN for the segment at the computed edge on every
+poll, and a packager that has stopped publishing fails that fetch:
+`segment_availability` **is** the freeze check for number-addressed DASH. This
+is why `segment_sample` matters more on a DASH target than on an HLS one.
+
+The tolerance before an unchanged edge counts as frozen is three segments,
+floored at 6s and raised by `@minimumUpdatePeriod`: a manifest that says it
+republishes every 30s is *supposed* to serve an identical timeline for 30s at a
+time, and judging it by its segment duration alone would report a healthy
+stream as frozen on almost every poll.
+
+A period that declares its own end is skipped too -- the completed period
+before an ad break is *supposed* to have a static timeline, and reporting it
+would page someone at every ad break on the channel.
 
 Parsing an MPD is a different job from parsing a playlist. Almost nothing a
 prober needs is stated outright: segment URLs live in templates, period start
@@ -382,10 +413,9 @@ Packages: `hls` and `dash` (manifest parsers), `probe` (prober + checks),
 
 ## Roadmap
 
-- **DASH checks**: port the cross-poll rules onto the DASH path -- live-edge
-  freeze and rollback, window size, wall-clock staleness -- plus multi-period
-  continuity, `@publishTime` not advancing within `@minimumUpdatePeriod`, and
-  the DRM checks against `ContentProtection`
+- **DASH: the remaining checks** -- DRM against `ContentProtection`, live-edge
+  staleness against wall clock, period-boundary awareness (the DASH analogue of
+  `discontinuity_present`), and init-segment reachability
 - **MPEG-TS / IPTV**: TR 101 290 P1/P2/P3-style checks (PCR jitter, CC errors, PAT/PMT integrity) via TSDuck
 - **Deep segment inspection**: decode a frame (ffprobe) for black/freeze, codec/res vs declared, PTS continuity
 - **Multi-vantage probing** (run from several regions; compare)
@@ -395,5 +425,5 @@ Packages: `hls` and `dash` (manifest parsers), `probe` (prober + checks),
 ## Status
 
 MVP. The HLS path is implemented and tested end to end (`make test`). DASH is
-probed for reachability and segment availability; its cross-poll and DRM checks
-are not written yet. Not yet production-hardened.
+probed for reachability, segment availability and live-edge progression; its
+DRM checks are not written yet. Not yet production-hardened.
