@@ -1,0 +1,24 @@
+{
+  "metrics_addr": ":9090",
+  "slack_webhook": "",
+  "targets": [
+    {
+      "name": "apple-bipbop-advanced",
+      "url": "https://devstreaming-cdn.apple.com/videos/streaming/examples/bipbop_adv_example_hls/master.m3u8",
+      "interval_seconds": 15,
+      "max_variants": 3,
+      "segment_sample": 2,
+      "expect_live": false,
+      "min_window_seconds": 0
+    },
+    {
+      "name": "example-live-channel",
+      "url": "https://example.com/live/channel1/master.m3u8",
+      "interval_seconds": 6,
+      "max_variants": 0,
+      "segment_sample": 2,
+      "expect_live": true,
+      "min_window_seconds": 30
+    }
+  ]
+}
