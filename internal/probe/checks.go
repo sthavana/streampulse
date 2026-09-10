@@ -27,6 +27,16 @@ func (p *Prober) runChecks(t config.Target, plURL, variant string, pl *hls.Media
 		return out
 	}
 
+	// An EXT-X-MAP with no URI names nothing to load, so playback of the
+	// segments it covers cannot start. RFC 8216 4.3.2.5 makes URI required.
+	for _, mp := range pl.Maps {
+		if mp.URI == "" {
+			out = append(out, finding(now, t, variant, alert.Critical, "map_missing_uri",
+				"EXT-X-MAP has no URI, which the spec requires"))
+			break
+		}
+	}
+
 	// --- TARGETDURATION compliance (RFC 8216 4.3.3.1: no segment may exceed it) ---
 	if pl.TargetDuration > 0 {
 		for _, s := range pl.Segments {

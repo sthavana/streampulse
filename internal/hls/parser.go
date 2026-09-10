@@ -92,14 +92,47 @@ func (m *MasterPlaylist) RenditionGroups() map[string][]Rendition {
 	return g
 }
 
+// Map is an EXT-X-MAP tag (RFC 8216 4.3.2.5): the initialisation section a
+// player must load before it can decode the segments that follow.
+//
+// It matters to a prober out of proportion to its size. Every fMP4 stream has
+// one, nothing else references it, and when it is missing the manifest still
+// parses and every media segment still serves -- playback simply never
+// starts, because the decoder was never initialised.
+type Map struct {
+	URI string
+	// ByteRange is the BYTERANGE attribute as written, "<n>[@<o>]", when the
+	// initialisation section is a slice of a larger resource.
+	ByteRange string
+}
+
+// Offset returns the byte offset of the initialisation section within its
+// resource, and whether BYTERANGE stated one. RFC 8216 makes the offset
+// optional; without it the section starts where the previous one ended, which
+// a prober has no way to know and does not need to.
+func (m Map) Offset() (int64, bool) {
+	i := strings.Index(m.ByteRange, "@")
+	if i < 0 {
+		return 0, false
+	}
+	n, err := strconv.ParseInt(strings.TrimSpace(m.ByteRange[i+1:]), 10, 64)
+	if err != nil || n < 0 {
+		return 0, false
+	}
+	return n, true
+}
+
 // Segment is one media segment reference in a media playlist.
 // Key is the EXT-X-KEY in force for this segment, or nil if it is in the clear.
+// Map is the EXT-X-MAP in force, or nil for a playlist of self-contained
+// segments (plain MPEG-TS).
 type Segment struct {
 	URI             string
 	Duration        float64
 	ProgramDateTime *time.Time
 	Discontinuity   bool
 	Key             *Key
+	Map             *Map
 }
 
 // MediaPlaylist is the parsed media (variant) playlist.
@@ -112,6 +145,26 @@ type MediaPlaylist struct {
 	// Keys holds every EXT-X-KEY tag in the order it appeared, including
 	// METHOD=NONE tags, which are meaningful: they mark a return to clear.
 	Keys []Key
+	// Maps holds every EXT-X-MAP tag in the order it appeared. A playlist has
+	// more than one when the initialisation section changes mid-stream, which
+	// happens at a discontinuity.
+	Maps []Map
+}
+
+// DistinctMaps returns the unique initialisation sections the playlist
+// references, so a prober fetches each once however many segments use it.
+func (m *MediaPlaylist) DistinctMaps() []Map {
+	var out []Map
+	seen := map[string]bool{}
+	for _, mp := range m.Maps {
+		id := mp.URI + "|" + mp.ByteRange
+		if seen[id] {
+			continue
+		}
+		seen[id] = true
+		out = append(out, mp)
+	}
+	return out
 }
 
 // DistinctKeys returns the unique encrypting keys referenced by the playlist,
@@ -246,6 +299,8 @@ func ParseMedia(raw string) *MediaPlaylist {
 		// An EXT-X-KEY applies to every segment that follows it, until the
 		// next EXT-X-KEY. METHOD=NONE clears it.
 		currentKey *Key
+		// EXT-X-MAP works the same way, minus the clearing form.
+		currentMap *Map
 	)
 	for _, line := range strings.Split(raw, "\n") {
 		line = strings.TrimSpace(line)
@@ -270,6 +325,12 @@ func ParseMedia(raw string) *MediaPlaylist {
 			} else {
 				currentKey = nil
 			}
+		case strings.HasPrefix(line, "#EXT-X-MAP:"):
+			attrs := parseAttributes(strings.TrimPrefix(line, "#EXT-X-MAP:"))
+			mp := Map{URI: attrs["URI"], ByteRange: attrs["BYTERANGE"]}
+			pl.Maps = append(pl.Maps, mp)
+			mc := mp
+			currentMap = &mc
 		case line == "#EXT-X-DISCONTINUITY":
 			pendingDisc = true
 		case strings.HasPrefix(line, "#EXT-X-PROGRAM-DATE-TIME:"):
@@ -286,7 +347,7 @@ func ParseMedia(raw string) *MediaPlaylist {
 				haveInf = true
 			}
 		case strings.HasPrefix(line, "#"):
-			// ignore other tags for now (KEY, MAP, BYTERANGE, etc.)
+			// ignore other tags for now (BYTERANGE, I-FRAME-STREAM-INF, etc.)
 		default:
 			if haveInf {
 				pl.Segments = append(pl.Segments, Segment{
@@ -295,6 +356,7 @@ func ParseMedia(raw string) *MediaPlaylist {
 					ProgramDateTime: pendingPDT,
 					Discontinuity:   pendingDisc,
 					Key:             currentKey,
+					Map:             currentMap,
 				})
 				pendingDur, pendingPDT, pendingDisc, haveInf = 0, nil, false, false
 			}

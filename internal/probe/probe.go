@@ -192,6 +192,20 @@ func (p *Prober) probeMedia(ctx context.Context, t config.Target, mediaURL, vari
 	}
 
 	if t.SegmentSample > 0 && len(pl.Segments) > 0 {
+		// A playlist has more than one initialisation section when it changes
+		// mid-stream, which happens at a discontinuity; each is fetched once
+		// however many segments reference it.
+		for _, mp := range pl.DistinctMaps() {
+			// A URI-less EXT-X-MAP is reported by runChecks as the spec
+			// violation it is. It must not be probed: resolving an empty
+			// reference yields the playlist's own URL, which would fetch
+			// successfully and report a broken stream as healthy.
+			if mp.URI == "" {
+				continue
+			}
+			offset, _ := mp.Offset()
+			p.probeInit(ctx, t, variant, resolveURL(mediaURL, mp.URI), offset)
+		}
 		urls := make([]string, len(pl.Segments))
 		for i, s := range pl.Segments {
 			urls[i] = resolveURL(mediaURL, s.URI)
@@ -210,7 +224,7 @@ func (p *Prober) sampleSegments(ctx context.Context, t config.Target, variant st
 		n = len(urls)
 	}
 	for _, u := range urls[len(urls)-n:] {
-		ttfb, status, err := p.probeSegment(ctx, u)
+		ttfb, status, err := p.probeSegment(ctx, u, 0)
 		if err != nil || status >= 400 {
 			p.reg.SetGauge("streampulse_segment_available", helpSegmentUp, 0, labels)
 			detail := "HTTP " + itoa(status)
@@ -285,12 +299,18 @@ func applyHeaders(req *http.Request, t config.Target) {
 
 // probeSegment measures availability and approximate time-to-first-byte using a
 // tiny range request, so it does not download whole segments.
-func (p *Prober) probeSegment(ctx context.Context, u string) (time.Duration, int, error) {
+//
+// offset is where in the resource to read those two bytes. It is 0 for a whole
+// segment and the BYTERANGE offset for an initialisation section that is a
+// slice of a larger file: asking at the offset proves the range is actually
+// satisfiable, where reading the first two bytes would pass against a file
+// truncated before the part we need.
+func (p *Prober) probeSegment(ctx context.Context, u string, offset int64) (time.Duration, int, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
 	if err != nil {
 		return 0, 0, err
 	}
-	req.Header.Set("Range", "bytes=0-1")
+	req.Header.Set("Range", "bytes="+i64toa(offset)+"-"+i64toa(offset+1))
 	start := time.Now()
 	resp, err := p.client.Do(req)
 	if err != nil {
@@ -302,6 +322,37 @@ func (p *Prober) probeSegment(ctx context.Context, u string) (time.Duration, int
 	ttfb := time.Since(start)
 	_, _ = io.Copy(io.Discard, resp.Body)
 	return ttfb, resp.StatusCode, nil
+}
+
+// probeInit fetch-checks an initialisation segment.
+//
+// It is worth a request of its own because its failure mode is invisible to
+// every other check: the manifest parses, every media segment is served, and
+// playback still cannot start, because a player loads the initialisation
+// section first and has nothing to initialise the decoder with. Unlike a media
+// segment at the live edge, it is static and should never not be there, so a
+// 404 here is unambiguous.
+//
+// Shared by both manifest formats: EXT-X-MAP and a DASH Initialization are the
+// same object under two names, and a stream should not be judged differently
+// for saying it in a different dialect.
+func (p *Prober) probeInit(ctx context.Context, t config.Target, variant, initURL string, offset int64) {
+	if initURL == "" {
+		return
+	}
+	labels := map[string]string{"target": t.Name, "variant": variant}
+	_, status, err := p.probeSegment(ctx, initURL, offset)
+	if err != nil || status >= 400 {
+		detail := "HTTP " + itoa(status)
+		if err != nil {
+			detail = err.Error()
+		}
+		p.reg.SetGauge("streampulse_init_segment_available", helpInitUp, 0, labels)
+		p.emit(t.Name, variant, alert.Critical, "init_segment_availability",
+			"initialisation segment not available ("+detail+"): "+initURL)
+		return
+	}
+	p.reg.SetGauge("streampulse_init_segment_available", helpInitUp, 1, labels)
 }
 
 // --- finding delivery ---

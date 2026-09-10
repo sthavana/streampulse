@@ -201,3 +201,97 @@ func TestRenditionLabelsAreUniqueAcrossGroups(t *testing.T) {
 		seen[l] = true
 	}
 }
+
+// EXT-X-MAP is what an fMP4 player loads before anything else, and nothing
+// else in the playlist references it.
+func TestParseMediaWithMap(t *testing.T) {
+	raw := `#EXTM3U
+#EXT-X-VERSION:7
+#EXT-X-TARGETDURATION:4
+#EXT-X-MAP:URI="init.mp4"
+#EXTINF:4.000,
+seg0.m4s
+#EXTINF:4.000,
+seg1.m4s
+`
+	pl := ParseMedia(raw)
+	if len(pl.Maps) != 1 || pl.Maps[0].URI != "init.mp4" {
+		t.Fatalf("map parse wrong: %+v", pl.Maps)
+	}
+	// It applies to every segment that follows it.
+	for i, s := range pl.Segments {
+		if s.Map == nil || s.Map.URI != "init.mp4" {
+			t.Errorf("segment %d has map %+v, want init.mp4", i, s.Map)
+		}
+	}
+}
+
+// A playlist whose initialisation section changes mid-stream, which is what a
+// discontinuity between differently-packaged sources looks like.
+func TestParseMediaWithChangingMap(t *testing.T) {
+	raw := `#EXTM3U
+#EXT-X-TARGETDURATION:4
+#EXT-X-MAP:URI="init_a.mp4"
+#EXTINF:4.000,
+a0.m4s
+#EXT-X-DISCONTINUITY
+#EXT-X-MAP:URI="init_b.mp4",BYTERANGE="800@1024"
+#EXTINF:4.000,
+b0.m4s
+#EXTINF:4.000,
+b1.m4s
+`
+	pl := ParseMedia(raw)
+	if len(pl.Maps) != 2 {
+		t.Fatalf("got %d maps, want 2", len(pl.Maps))
+	}
+	if pl.Segments[0].Map.URI != "init_a.mp4" {
+		t.Errorf("first segment map = %q", pl.Segments[0].Map.URI)
+	}
+	if pl.Segments[2].Map.URI != "init_b.mp4" {
+		t.Errorf("last segment map = %q", pl.Segments[2].Map.URI)
+	}
+	off, ok := pl.Maps[1].Offset()
+	if !ok || off != 1024 {
+		t.Errorf("BYTERANGE offset = %d/%v, want 1024/true", off, ok)
+	}
+}
+
+// A segment playlist with no EXT-X-MAP is the normal MPEG-TS case, not a fault.
+func TestParseMediaWithoutMap(t *testing.T) {
+	pl := ParseMedia("#EXTM3U\n#EXT-X-TARGETDURATION:4\n#EXTINF:4.0,\nseg0.ts\n")
+	if len(pl.Maps) != 0 || pl.Segments[0].Map != nil {
+		t.Errorf("a TS playlist should carry no map, got %+v", pl.Maps)
+	}
+}
+
+func TestMapOffset(t *testing.T) {
+	cases := map[string]struct {
+		want int64
+		ok   bool
+	}{
+		"800@1024": {1024, true},
+		"800":      {0, false}, // length only: the offset continues the previous section
+		"":         {0, false},
+		"800@":     {0, false},
+		"800@junk": {0, false},
+		"800@-1":   {0, false},
+	}
+	for in, want := range cases {
+		got, ok := Map{ByteRange: in}.Offset()
+		if got != want.want || ok != want.ok {
+			t.Errorf("Offset(%q) = %d/%v, want %d/%v", in, got, ok, want.want, want.ok)
+		}
+	}
+}
+
+// DistinctMaps exists so a 300-segment window does not mean 300 fetches of
+// the same initialisation section.
+func TestDistinctMaps(t *testing.T) {
+	pl := &MediaPlaylist{Maps: []Map{
+		{URI: "init.mp4"}, {URI: "init.mp4"}, {URI: "other.mp4"}, {URI: "init.mp4", ByteRange: "10@0"},
+	}}
+	if got := len(pl.DistinctMaps()); got != 3 {
+		t.Errorf("got %d distinct maps, want 3: %+v", got, pl.DistinctMaps())
+	}
+}

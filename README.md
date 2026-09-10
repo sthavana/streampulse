@@ -42,6 +42,8 @@ against alternative audio and subtitle tracks as well as the video ladder.
 | `pdt_stale` | warning | Projected live edge is behind wall-clock |
 | `short_window` | warning | Live/DVR window shorter than expected |
 | `targetduration_missing` | warning | Missing required tag |
+| `init_segment_availability` | critical | `EXT-X-MAP` initialisation section 404s -- playback cannot start at all |
+| `map_missing_uri` | critical | `EXT-X-MAP` with no `URI`, which the spec requires |
 | `rendition_group_missing` | critical | Variant references an AUDIO/SUBTITLES/VIDEO group no `EXT-X-MEDIA` declares |
 | `rendition_duplicate_name` | warning | Two renditions in one group share a `NAME` (RFC 8216 4.3.4.1.1) |
 | `rendition_multiple_default` | warning | More than one `DEFAULT=YES` in a group |
@@ -91,6 +93,27 @@ Two per-target knobs, both optional:
 
 `rendition_types` is the one to reach for on a stream carrying thirty subtitle
 languages you do not need to probe every few seconds.
+
+## Initialisation sections (EXT-X-MAP)
+
+Every fMP4 stream carries an `EXT-X-MAP`: the initialisation section a player
+loads before it can decode anything. Nothing else in the playlist references
+it, so when it goes missing the manifest still parses, every media segment
+still serves, and playback simply never starts. It gets a request of its own
+for that reason, and unlike a segment at the live edge it is static, so a 404
+there is unambiguous.
+
+Each distinct section is fetched once per cycle however many segments
+reference it. A playlist has more than one when the initialisation section
+changes mid-stream, which happens at a discontinuity between differently
+packaged sources. A `BYTERANGE` section is probed *at its declared offset*
+rather than at byte zero, so a file truncated before the part that matters is
+caught instead of passed.
+
+`EXT-X-MAP` and a DASH `Initialization` are the same object under two names,
+and both formats run the same check through the same code: a stream is not
+judged differently for saying it in a different dialect. Exported as
+`streampulse_init_segment_available`.
 
 ## DRM and EXT-X-KEY
 
@@ -506,8 +529,6 @@ Packages: `hls` and `dash` (manifest parsers), `probe` (prober + checks),
 
 ## Roadmap
 
-- **HLS: `EXT-X-MAP`** -- the init segment is checked on the DASH path but not
-  yet on the HLS one, where the parser does not read the tag
 - **Low-latency DASH** -- chunked `availabilityTimeOffset` streams are parsed
   but their sub-segment timing is not checked
 - **MPEG-TS / IPTV**: TR 101 290 P1/P2/P3-style checks (PCR jitter, CC errors, PAT/PMT integrity) via TSDuck
