@@ -22,6 +22,7 @@ type Prober struct {
 	client   *http.Client
 	reg      *metrics.Registry
 	notifier alert.Notifier
+	now      func() time.Time // injectable so the cross-poll checks are testable
 
 	mu    sync.Mutex
 	state map[string]*plState // keyed by media-playlist URL
@@ -38,6 +39,7 @@ func New(reg *metrics.Registry, n alert.Notifier) *Prober {
 		client:   &http.Client{Timeout: 15 * time.Second},
 		reg:      reg,
 		notifier: n,
+		now:      time.Now,
 		state:    make(map[string]*plState),
 	}
 }
@@ -181,7 +183,7 @@ func (p *Prober) record(f alert.Finding) {
 
 func (p *Prober) emit(target, variant string, sev alert.Severity, check, msg string) {
 	p.record(alert.Finding{
-		Time: time.Now().UTC(), Target: target, Variant: variant,
+		Time: p.now().UTC(), Target: target, Variant: variant,
 		Severity: sev, Check: check, Message: msg,
 	})
 }

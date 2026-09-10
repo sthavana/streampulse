@@ -14,15 +14,15 @@ import (
 // the previous one for the same playlist URL.
 func (p *Prober) runChecks(t config.Target, plURL, variant string, pl *hls.MediaPlaylist) []alert.Finding {
 	var out []alert.Finding
-	now := time.Now().UTC()
+	now := p.now().UTC()
 
 	// --- structural sanity ---
 	if pl.TargetDuration == 0 {
-		out = append(out, finding(t, variant, alert.Warning, "targetduration_missing",
+		out = append(out, finding(now, t, variant, alert.Warning, "targetduration_missing",
 			"playlist has no EXT-X-TARGETDURATION"))
 	}
 	if len(pl.Segments) == 0 {
-		out = append(out, finding(t, variant, alert.Critical, "no_segments",
+		out = append(out, finding(now, t, variant, alert.Critical, "no_segments",
 			"playlist contains no media segments"))
 		return out
 	}
@@ -31,7 +31,7 @@ func (p *Prober) runChecks(t config.Target, plURL, variant string, pl *hls.Media
 	if pl.TargetDuration > 0 {
 		for _, s := range pl.Segments {
 			if s.Duration > float64(pl.TargetDuration)+0.5 {
-				out = append(out, finding(t, variant, alert.Warning, "targetduration_violation",
+				out = append(out, finding(now, t, variant, alert.Warning, "targetduration_violation",
 					"segment duration "+ftoa(s.Duration)+"s exceeds TARGETDURATION "+itoa(pl.TargetDuration)+"s: "+s.URI))
 				break
 			}
@@ -40,58 +40,19 @@ func (p *Prober) runChecks(t config.Target, plURL, variant string, pl *hls.Media
 
 	live := !pl.EndList
 	if t.ExpectLive && pl.EndList {
-		out = append(out, finding(t, variant, alert.Critical, "unexpected_endlist",
+		out = append(out, finding(now, t, variant, alert.Critical, "unexpected_endlist",
 			"expected a live stream but the playlist carries EXT-X-ENDLIST"))
 	}
 
 	// --- live window size ---
 	if t.MinWindowSec > 0 && pl.Duration() < t.MinWindowSec {
-		out = append(out, finding(t, variant, alert.Warning, "short_window",
+		out = append(out, finding(now, t, variant, alert.Warning, "short_window",
 			"live window "+ftoa(pl.Duration())+"s is below the expected "+ftoa(t.MinWindowSec)+"s"))
 	}
 
-	// --- stateful checks: freeze detection + PDT progression ---
 	if live {
-		latestPDT := lastPDT(pl)
-
-		p.mu.Lock()
-		st := p.state[plURL]
-		if st == nil {
-			st = &plState{lastSequence: pl.MediaSequence, lastSeqChange: now, lastPDT: latestPDT}
-			p.state[plURL] = st
-		} else {
-			if pl.MediaSequence > st.lastSequence {
-				st.lastSequence = pl.MediaSequence
-				st.lastSeqChange = now
-			} else {
-				stalled := now.Sub(st.lastSeqChange)
-				threshold := time.Duration(3*maxInt(pl.TargetDuration, 2)) * time.Second
-				if stalled > threshold {
-					out = append(out, finding(t, variant, alert.Critical, "playlist_stalled",
-						"media sequence has not advanced for "+ftoa(stalled.Seconds())+"s (live edge frozen)"))
-				}
-			}
-			if latestPDT != nil {
-				if st.lastPDT != nil && !latestPDT.After(*st.lastPDT) {
-					out = append(out, finding(t, variant, alert.Warning, "pdt_not_advancing",
-						"EXT-X-PROGRAM-DATE-TIME did not advance since the previous poll"))
-				}
-				st.lastPDT = latestPDT
-			}
-		}
-		p.mu.Unlock()
-
-		// Heuristic staleness vs wall-clock. Requires an accurate local clock
-		// (NTP) and is intentionally conservative to avoid false positives on
-		// high-latency / large-DVR configurations.
-		if latestPDT != nil && pl.TargetDuration > 0 {
-			lastEnd := latestPDT.Add(time.Duration(pl.Segments[len(pl.Segments)-1].Duration * float64(time.Second)))
-			behind := now.Sub(lastEnd).Seconds()
-			if behind > float64(pl.TargetDuration)*3 {
-				out = append(out, finding(t, variant, alert.Warning, "pdt_stale",
-					"live-edge PROGRAM-DATE-TIME is "+ftoa(behind)+"s behind wall-clock"))
-			}
-		}
+		out = append(out, p.crossPollChecks(now, t, plURL, variant, pl)...)
+		out = append(out, edgeStalenessCheck(now, t, variant, pl)...)
 	}
 
 	// --- discontinuity awareness (informational; useful around ad breaks) ---
@@ -102,27 +63,124 @@ func (p *Prober) runChecks(t config.Target, plURL, variant string, pl *hls.Media
 		}
 	}
 	if discCount > 0 {
-		out = append(out, finding(t, variant, alert.Info, "discontinuity_present",
+		out = append(out, finding(now, t, variant, alert.Info, "discontinuity_present",
 			itoa(discCount)+" discontinuity marker(s) in the current window"))
 	}
 
 	return out
 }
 
+// crossPollChecks compares this poll against the stored state for the same
+// playlist URL: freeze detection, window rollback, and PDT progression.
+func (p *Prober) crossPollChecks(now time.Time, t config.Target, plURL, variant string, pl *hls.MediaPlaylist) []alert.Finding {
+	var out []alert.Finding
+	anchorPDT := lastPDT(pl)
+
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	st := p.state[plURL]
+	if st == nil {
+		// First sighting: record a baseline. There is nothing to compare against
+		// yet, so no cross-poll rule can fire.
+		p.state[plURL] = &plState{lastSequence: pl.MediaSequence, lastSeqChange: now, lastPDT: anchorPDT}
+		return out
+	}
+
+	seqAdvanced := pl.MediaSequence > st.lastSequence
+	switch {
+	case seqAdvanced:
+		st.lastSequence = pl.MediaSequence
+		st.lastSeqChange = now
+
+	case pl.MediaSequence < st.lastSequence:
+		// The window moved backwards: an origin failover, or a load balancer
+		// serving a stale cache. Distinct from a frozen edge, and always a fault.
+		out = append(out, finding(now, t, variant, alert.Critical, "playlist_rollback",
+			"media sequence went backwards, "+itoa(st.lastSequence)+" -> "+itoa(pl.MediaSequence)+
+				" (stale origin or failover)"))
+		st.lastSequence = pl.MediaSequence
+		st.lastSeqChange = now
+
+	default:
+		// Unchanged. Only a fault once it has outlasted a few segments: polling
+		// faster than the segment duration legitimately sees the same playlist
+		// on consecutive polls.
+		stalled := now.Sub(st.lastSeqChange)
+		threshold := time.Duration(3*maxInt(pl.TargetDuration, 2)) * time.Second
+		if stalled > threshold {
+			out = append(out, finding(now, t, variant, alert.Critical, "playlist_stalled",
+				"media sequence has not advanced for "+ftoa(stalled.Seconds())+"s (live edge frozen)"))
+		}
+	}
+
+	// PDT is only expected to move when the window itself moved. Comparing it on
+	// every poll fires spuriously whenever the poll interval is shorter than a
+	// segment duration, which is the common configuration.
+	if anchorPDT != nil {
+		if seqAdvanced && st.lastPDT != nil && !anchorPDT.After(*st.lastPDT) {
+			out = append(out, finding(now, t, variant, alert.Warning, "pdt_not_advancing",
+				"media sequence advanced but EXT-X-PROGRAM-DATE-TIME did not"))
+		}
+		st.lastPDT = anchorPDT
+	}
+
+	return out
+}
+
+// edgeStalenessCheck compares the projected live edge against the local clock.
+// Heuristic: it requires an accurate local clock (NTP) and is intentionally
+// conservative to avoid false positives on high-latency / large-DVR configs.
+func edgeStalenessCheck(now time.Time, t config.Target, variant string, pl *hls.MediaPlaylist) []alert.Finding {
+	if pl.TargetDuration == 0 {
+		return nil
+	}
+	edge := liveEdgePDT(pl)
+	if edge == nil {
+		return nil
+	}
+	behind := now.Sub(*edge).Seconds()
+	if behind > float64(pl.TargetDuration)*3 {
+		return []alert.Finding{finding(now, t, variant, alert.Warning, "pdt_stale",
+			"live-edge PROGRAM-DATE-TIME is "+ftoa(behind)+"s behind wall-clock")}
+	}
+	return nil
+}
+
 // --- shared helpers (used across the probe package) ---
 
-func finding(t config.Target, variant string, sev alert.Severity, check, msg string) alert.Finding {
+func finding(now time.Time, t config.Target, variant string, sev alert.Severity, check, msg string) alert.Finding {
 	return alert.Finding{
-		Time: time.Now().UTC(), Target: t.Name, Variant: variant,
+		Time: now, Target: t.Name, Variant: variant,
 		Severity: sev, Check: check, Message: msg,
 	}
 }
 
+// lastPDT returns the most recent EXT-X-PROGRAM-DATE-TIME value carried in the
+// playlist, i.e. the anchor tag itself, not the time of the live edge.
 func lastPDT(pl *hls.MediaPlaylist) *time.Time {
 	for i := len(pl.Segments) - 1; i >= 0; i-- {
 		if pl.Segments[i].ProgramDateTime != nil {
 			return pl.Segments[i].ProgramDateTime
 		}
+	}
+	return nil
+}
+
+// liveEdgePDT projects the wall-clock time at which the last segment ends.
+// Packagers commonly emit PDT only on the first segment of a playlist, or only
+// after a discontinuity, so the anchor tag is usually not on the final segment:
+// the durations of every segment from the anchor onward have to be added to it.
+func liveEdgePDT(pl *hls.MediaPlaylist) *time.Time {
+	for i := len(pl.Segments) - 1; i >= 0; i-- {
+		if pl.Segments[i].ProgramDateTime == nil {
+			continue
+		}
+		edge := *pl.Segments[i].ProgramDateTime
+		for _, s := range pl.Segments[i:] {
+			edge = edge.Add(time.Duration(s.Duration * float64(time.Second)))
+		}
+		return &edge
 	}
 	return nil
 }

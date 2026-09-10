@@ -28,10 +28,12 @@ existing Prometheus + Grafana + Alertmanager stack.
 | `manifest_fetch` / `media_fetch` | critical | Origin/CDN unreachable or non-200 |
 | `segment_availability` | critical | Manifest references a segment that 404s / errors |
 | `playlist_stalled` | critical | Live media sequence not advancing (frozen edge) |
+| `playlist_rollback` | critical | Media sequence went backwards (stale origin / failover) |
 | `no_segments` | critical | Playlist parsed but empty |
 | `unexpected_endlist` | critical | `EXT-X-ENDLIST` on a stream you declared live |
 | `targetduration_violation` | warning | Segment longer than `EXT-X-TARGETDURATION` (RFC 8216) |
-| `pdt_not_advancing` / `pdt_stale` | warning | `PROGRAM-DATE-TIME` frozen or behind wall-clock |
+| `pdt_not_advancing` | warning | Window slid but `PROGRAM-DATE-TIME` did not follow |
+| `pdt_stale` | warning | Projected live edge is behind wall-clock |
 | `short_window` | warning | Live/DVR window shorter than expected |
 | `targetduration_missing` | warning | Missing required tag |
 | `discontinuity_present` | info | Discontinuity markers in window (ad-break awareness) |
