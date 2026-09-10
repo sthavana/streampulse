@@ -23,6 +23,10 @@ existing Prometheus + Grafana + Alertmanager stack.
 
 ## What it checks today (HLS)
 
+Variants and `EXT-X-MEDIA` renditions alike -- the playlist checks below run
+against alternative audio and subtitle tracks as well as the video ladder.
+
+
 | Check | Severity | What it catches |
 |---|---|---|
 | `manifest_fetch` / `media_fetch` | critical | Origin/CDN unreachable or non-200 |
@@ -36,9 +40,48 @@ existing Prometheus + Grafana + Alertmanager stack.
 | `pdt_stale` | warning | Projected live edge is behind wall-clock |
 | `short_window` | warning | Live/DVR window shorter than expected |
 | `targetduration_missing` | warning | Missing required tag |
+| `rendition_group_missing` | critical | Variant references an AUDIO/SUBTITLES/VIDEO group no `EXT-X-MEDIA` declares |
+| `rendition_duplicate_name` | warning | Two renditions in one group share a `NAME` (RFC 8216 4.3.4.1.1) |
+| `rendition_multiple_default` | warning | More than one `DEFAULT=YES` in a group |
+| `closed_captions_with_uri` | warning | `CLOSED-CAPTIONS` rendition carries a `URI`, which the spec forbids |
 | `discontinuity_present` | info | Discontinuity markers in window (ad-break awareness) |
 
 Each finding is also counted in `streampulse_findings_total{check,severity,...}`.
+
+## Renditions (EXT-X-MEDIA)
+
+Alternative audio, subtitle and video-angle tracks are declared with
+`EXT-X-MEDIA`, separately from the `EXT-X-STREAM-INF` ladder. A tool that walks
+only the variants will report a stream as perfectly healthy while its audio is
+dead -- which is one of the more common real-world breaks.
+
+Renditions carrying a `URI` are probed with the same rules as any media
+playlist: reachability, stall and rollback, PDT progression, segment
+availability and TTFB. They are declared once at the master level, so they are
+fetched once per cycle no matter how many variants reference them.
+
+A rendition with **no** `URI` is skipped, and that absence is meaningful rather
+than a defect: audio without a URI is muxed into the variant streams, and for
+`CLOSED-CAPTIONS` the URI *must not* be present at all -- captions ride inside
+the video segments. Unified Streaming's live demo declares its audio this way;
+Apple's fMP4 example ships separate audio and subtitle playlists.
+
+Renditions are labelled `type/group/name`, e.g. `audio/aud1/English`. The group
+is part of the label because `NAME` alone is not unique: Apple's own reference
+stream declares three audio renditions all named "English" (a stereo mix and
+two 5.1 mixes) in groups `aud1`/`aud2`/`aud3`. Labelling them by name alone
+would collapse three independent tracks into one metric series and one
+incident, masking a break in any of them.
+
+Two per-target knobs, both optional:
+
+```json
+"max_renditions": 0,              // 0 = all renditions that have a URI
+"rendition_types": ["AUDIO"]      // omit for every type
+```
+
+`rendition_types` is the one to reach for on a stream carrying thirty subtitle
+languages you do not need to probe every few seconds.
 
 ## Alerting: incidents, not findings
 
@@ -127,7 +170,8 @@ matches is worse than one that refuses to load.
 `streampulse_media_fetch_seconds`, `streampulse_media_sequence`,
 `streampulse_playlist_window_seconds`, `streampulse_segment_count`,
 `streampulse_segment_available`, `streampulse_segment_ttfb_seconds`,
-`streampulse_variant_count`, `streampulse_findings_total`,
+`streampulse_variant_count`, `streampulse_rendition_count`,
+`streampulse_findings_total`,
 `streampulse_incident_active`, `streampulse_incidents_opened_total`,
 `streampulse_incidents_resolved_total`, `streampulse_maintenance_active`,
 `streampulse_notifications_suppressed_total`.

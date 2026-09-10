@@ -20,19 +20,73 @@ const (
 )
 
 // Variant is one entry in a master playlist (one rung of the ABR ladder).
+// The *Group fields name the EXT-X-MEDIA groups this variant pulls from.
 type Variant struct {
-	URI          string
-	Bandwidth    int
-	AvgBandwidth int
-	Resolution   string
-	Codecs       string
-	FrameRate    float64
-	AudioGroup   string
+	URI            string
+	Bandwidth      int
+	AvgBandwidth   int
+	Resolution     string
+	Codecs         string
+	FrameRate      float64
+	AudioGroup     string
+	VideoGroup     string
+	SubtitleGroup  string
+	ClosedCaptions string // may be the enumerated value NONE rather than a group id
+}
+
+// Rendition is one EXT-X-MEDIA entry: an alternative audio track, subtitle
+// track, video angle, or closed-caption stream.
+//
+// URI is optional and its absence is meaningful, not a defect: audio with no
+// URI is muxed into the variant streams, and for CLOSED-CAPTIONS the URI MUST
+// NOT be present at all (RFC 8216 4.3.4.1). Only renditions carrying a URI are
+// separately fetchable, so only those can be probed.
+type Rendition struct {
+	Type       string // AUDIO, VIDEO, SUBTITLES, CLOSED-CAPTIONS
+	GroupID    string
+	Name       string
+	Language   string
+	URI        string
+	Default    bool
+	AutoSelect bool
+	Forced     bool
+	Channels   string
+	InstreamID string
+}
+
+// Label renders a rendition for use as a metric label and in findings.
+//
+// The GROUP-ID is included because NAME alone is not unique across a playlist:
+// Apple's own reference stream declares three audio renditions all named
+// "English" in groups aud1/aud2/aud3 (stereo and two 5.1 mixes). Collapsing
+// those to one label would overwrite each other's metrics and merge three
+// independent renditions into a single incident. RFC 8216 4.3.4.1.1 requires
+// NAME to be unique within a group, so type+group+name is unique.
+func (r Rendition) Label() string {
+	name := r.Name
+	if name == "" {
+		name = r.Language
+	}
+	if name == "" {
+		return strings.ToLower(r.Type) + "/" + r.GroupID
+	}
+	return strings.ToLower(r.Type) + "/" + r.GroupID + "/" + name
 }
 
 // MasterPlaylist is the parsed multivariant playlist.
 type MasterPlaylist struct {
-	Variants []Variant
+	Variants   []Variant
+	Renditions []Rendition
+}
+
+// RenditionGroups indexes renditions by (type, group id), the pair a variant
+// uses to reference them.
+func (m *MasterPlaylist) RenditionGroups() map[string][]Rendition {
+	g := make(map[string][]Rendition)
+	for _, r := range m.Renditions {
+		g[r.Type+"/"+r.GroupID] = append(g[r.Type+"/"+r.GroupID], r)
+	}
+	return g
 }
 
 // Segment is one media segment reference in a media playlist.
@@ -84,9 +138,12 @@ func ParseMaster(raw string) *MasterPlaylist {
 		if strings.HasPrefix(line, "#EXT-X-STREAM-INF:") {
 			attrs := parseAttributes(strings.TrimPrefix(line, "#EXT-X-STREAM-INF:"))
 			v := Variant{
-				Codecs:     attrs["CODECS"],
-				Resolution: attrs["RESOLUTION"],
-				AudioGroup: attrs["AUDIO"],
+				Codecs:         attrs["CODECS"],
+				Resolution:     attrs["RESOLUTION"],
+				AudioGroup:     attrs["AUDIO"],
+				VideoGroup:     attrs["VIDEO"],
+				SubtitleGroup:  attrs["SUBTITLES"],
+				ClosedCaptions: attrs["CLOSED-CAPTIONS"],
 			}
 			v.Bandwidth = atoiSafe(attrs["BANDWIDTH"])
 			v.AvgBandwidth = atoiSafe(attrs["AVERAGE-BANDWIDTH"])
@@ -94,6 +151,22 @@ func ParseMaster(raw string) *MasterPlaylist {
 				v.FrameRate = fr
 			}
 			pending = &v
+			continue
+		}
+		if strings.HasPrefix(line, "#EXT-X-MEDIA:") {
+			attrs := parseAttributes(strings.TrimPrefix(line, "#EXT-X-MEDIA:"))
+			mp.Renditions = append(mp.Renditions, Rendition{
+				Type:       attrs["TYPE"],
+				GroupID:    attrs["GROUP-ID"],
+				Name:       attrs["NAME"],
+				Language:   attrs["LANGUAGE"],
+				URI:        attrs["URI"],
+				Default:    attrs["DEFAULT"] == "YES",
+				AutoSelect: attrs["AUTOSELECT"] == "YES",
+				Forced:     attrs["FORCED"] == "YES",
+				Channels:   attrs["CHANNELS"],
+				InstreamID: attrs["INSTREAM-ID"],
+			})
 			continue
 		}
 		if strings.HasPrefix(line, "#") {

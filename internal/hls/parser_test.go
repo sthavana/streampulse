@@ -77,3 +77,127 @@ seg101.ts
 		t.Errorf("Duration() = %v, want 7.968", got)
 	}
 }
+
+func TestParseMasterRenditions(t *testing.T) {
+	raw := `#EXTM3U
+#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="aac",NAME="English",LANGUAGE="en",DEFAULT=YES,AUTOSELECT=YES,CHANNELS="2",URI="audio/en.m3u8"
+#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="aac",NAME="Français",LANGUAGE="fr",DEFAULT=NO,AUTOSELECT=YES,URI="audio/fr.m3u8"
+#EXT-X-MEDIA:TYPE=SUBTITLES,GROUP-ID="subs",NAME="English",LANGUAGE="en",FORCED=NO,URI="subs/en.m3u8"
+#EXT-X-MEDIA:TYPE=CLOSED-CAPTIONS,GROUP-ID="cc",NAME="CC1",LANGUAGE="en",INSTREAM-ID="CC1"
+#EXT-X-STREAM-INF:BANDWIDTH=2000000,RESOLUTION=1280x720,AUDIO="aac",SUBTITLES="subs",CLOSED-CAPTIONS="cc"
+720p.m3u8
+`
+	m := ParseMaster(raw)
+	if len(m.Renditions) != 4 {
+		t.Fatalf("got %d renditions, want 4", len(m.Renditions))
+	}
+
+	en := m.Renditions[0]
+	if en.Type != "AUDIO" || en.GroupID != "aac" || en.Name != "English" || en.Language != "en" {
+		t.Errorf("audio rendition parsed wrong: %+v", en)
+	}
+	if en.URI != "audio/en.m3u8" {
+		t.Errorf("URI = %q, want audio/en.m3u8", en.URI)
+	}
+	if !en.Default || !en.AutoSelect {
+		t.Errorf("DEFAULT/AUTOSELECT not parsed: %+v", en)
+	}
+	if en.Channels != "2" {
+		t.Errorf("CHANNELS = %q, want 2", en.Channels)
+	}
+	if m.Renditions[1].Default {
+		t.Error("DEFAULT=NO should parse as false")
+	}
+
+	// CLOSED-CAPTIONS legitimately carries no URI: it rides in the video.
+	cc := m.Renditions[3]
+	if cc.URI != "" {
+		t.Errorf("closed-captions URI = %q, want empty", cc.URI)
+	}
+	if cc.InstreamID != "CC1" {
+		t.Errorf("INSTREAM-ID = %q, want CC1", cc.InstreamID)
+	}
+
+	v := m.Variants[0]
+	if v.AudioGroup != "aac" || v.SubtitleGroup != "subs" || v.ClosedCaptions != "cc" {
+		t.Errorf("variant group references parsed wrong: %+v", v)
+	}
+	if v.URI != "720p.m3u8" {
+		t.Errorf("EXT-X-MEDIA tags disturbed variant URI pairing: %q", v.URI)
+	}
+}
+
+// An EXT-X-MEDIA tag between an EXT-X-STREAM-INF and its URI must not be
+// mistaken for the variant URI.
+func TestRenditionTagDoesNotBreakVariantPairing(t *testing.T) {
+	raw := `#EXTM3U
+#EXT-X-STREAM-INF:BANDWIDTH=800000,RESOLUTION=640x360,AUDIO="aac"
+#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="aac",NAME="English",URI="audio/en.m3u8"
+360p.m3u8
+`
+	m := ParseMaster(raw)
+	if len(m.Variants) != 1 {
+		t.Fatalf("got %d variants, want 1", len(m.Variants))
+	}
+	if m.Variants[0].URI != "360p.m3u8" {
+		t.Errorf("variant URI = %q, want 360p.m3u8", m.Variants[0].URI)
+	}
+	if len(m.Renditions) != 1 || m.Renditions[0].URI != "audio/en.m3u8" {
+		t.Errorf("rendition parsed wrong: %+v", m.Renditions)
+	}
+}
+
+func TestRenditionGroups(t *testing.T) {
+	m := &MasterPlaylist{Renditions: []Rendition{
+		{Type: "AUDIO", GroupID: "aac", Name: "English"},
+		{Type: "AUDIO", GroupID: "aac", Name: "French"},
+		{Type: "SUBTITLES", GroupID: "subs", Name: "English"},
+	}}
+	g := m.RenditionGroups()
+	if len(g["AUDIO/aac"]) != 2 {
+		t.Errorf("AUDIO/aac has %d members, want 2", len(g["AUDIO/aac"]))
+	}
+	if len(g["SUBTITLES/subs"]) != 1 {
+		t.Errorf("SUBTITLES/subs has %d members, want 1", len(g["SUBTITLES/subs"]))
+	}
+	if len(g["AUDIO/missing"]) != 0 {
+		t.Error("an undeclared group should be empty")
+	}
+}
+
+func TestRenditionLabel(t *testing.T) {
+	cases := []struct {
+		r    Rendition
+		want string
+	}{
+		{Rendition{Type: "AUDIO", GroupID: "aud1", Name: "English"}, "audio/aud1/English"},
+		{Rendition{Type: "SUBTITLES", GroupID: "sub1", Name: "Français"}, "subtitles/sub1/Français"},
+		{Rendition{Type: "AUDIO", GroupID: "g", Language: "de"}, "audio/g/de"}, // no NAME
+		{Rendition{Type: "AUDIO", GroupID: "aac"}, "audio/aac"},                // no NAME or LANGUAGE
+	}
+	for _, c := range cases {
+		if got := c.r.Label(); got != c.want {
+			t.Errorf("Label() = %q, want %q", got, c.want)
+		}
+	}
+}
+
+// Apple's own reference stream names three different audio renditions
+// "English", distinguished only by group (stereo aud1, and two 5.1 mixes).
+// Their labels must not collide, or three renditions share one metric series
+// and one incident key, and a break in one is masked by the others.
+func TestRenditionLabelsAreUniqueAcrossGroups(t *testing.T) {
+	rs := []Rendition{
+		{Type: "AUDIO", GroupID: "aud1", Name: "English", Channels: "2"},
+		{Type: "AUDIO", GroupID: "aud2", Name: "English", Channels: "6"},
+		{Type: "AUDIO", GroupID: "aud3", Name: "English", Channels: "6"},
+	}
+	seen := map[string]bool{}
+	for _, r := range rs {
+		l := r.Label()
+		if seen[l] {
+			t.Fatalf("label collision on %q", l)
+		}
+		seen[l] = true
+	}
+}

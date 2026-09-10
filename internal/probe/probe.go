@@ -65,16 +65,27 @@ func (p *Prober) ProbeTarget(ctx context.Context, t config.Target) {
 	case hls.Master:
 		master := hls.ParseMaster(raw)
 		p.reg.SetGauge("streampulse_variant_count", "Variants declared in the master playlist", float64(len(master.Variants)), labels)
+		p.reg.SetGauge("streampulse_rendition_count", "EXT-X-MEDIA renditions declared in the master playlist", float64(len(master.Renditions)), labels)
 		if len(master.Variants) == 0 {
 			p.emit(t.Name, "", alert.Warning, "master_empty", "master playlist declared no variants")
 			return
 		}
+		for _, f := range masterChecks(p.now().UTC(), t, master) {
+			p.record(f)
+		}
+
 		variants := master.Variants
 		if t.MaxVariants > 0 && len(variants) > t.MaxVariants {
 			variants = variants[:t.MaxVariants]
 		}
 		for _, v := range variants {
 			p.probeMedia(ctx, t, resolveURL(t.URL, v.URI), variantLabel(v))
+		}
+
+		// Renditions are declared once at the master level, so they are probed
+		// once per cycle regardless of how many variants reference them.
+		for _, r := range selectRenditions(t, master) {
+			p.probeMedia(ctx, t, resolveURL(t.URL, r.URI), r.Label())
 		}
 	case hls.Media:
 		p.probeMedia(ctx, t, t.URL, "direct")

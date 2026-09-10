@@ -14,13 +14,15 @@ import (
 
 // Target is one stream to monitor.
 type Target struct {
-	Name            string  `json:"name"`
-	URL             string  `json:"url"`
-	IntervalSeconds int     `json:"interval_seconds"`
-	MaxVariants     int     `json:"max_variants"`       // 0 = probe all variants
-	SegmentSample   int     `json:"segment_sample"`     // segments per variant to fetch-check (0 = none)
-	ExpectLive      bool    `json:"expect_live"`        // flag if an ENDLIST appears
-	MinWindowSec    float64 `json:"min_window_seconds"` // warn if live window shorter than this (0 = skip)
+	Name            string   `json:"name"`
+	URL             string   `json:"url"`
+	IntervalSeconds int      `json:"interval_seconds"`
+	MaxVariants     int      `json:"max_variants"`       // 0 = probe all variants
+	MaxRenditions   int      `json:"max_renditions"`     // 0 = probe all EXT-X-MEDIA renditions that have a URI
+	RenditionTypes  []string `json:"rendition_types"`    // e.g. ["AUDIO"]; empty = every type
+	SegmentSample   int      `json:"segment_sample"`     // segments per variant to fetch-check (0 = none)
+	ExpectLive      bool     `json:"expect_live"`        // flag if an ENDLIST appears
+	MinWindowSec    float64  `json:"min_window_seconds"` // warn if live window shorter than this (0 = skip)
 }
 
 // Alerting tunes the incident lifecycle: how findings are deduplicated into
