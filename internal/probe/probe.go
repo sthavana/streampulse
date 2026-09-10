@@ -160,16 +160,30 @@ func (p *Prober) probeHLS(ctx context.Context, t config.Target, res fetchResult)
 			p.probeMedia(ctx, t, resolveURL(t.URL, r.URI), r.Label())
 		}
 	case hls.Media:
-		p.probeMedia(ctx, t, t.URL, "direct")
+		// The target is itself a media playlist: reuse the body ProbeTarget
+		// already fetched rather than asking the origin for it again.
+		p.checkMedia(ctx, t, t.URL, "direct", res)
 	default:
 		p.emit(t.Name, "", alert.Warning, "unknown_playlist", "response was not a recognizable HLS playlist or DASH MPD")
 	}
 }
 
 func (p *Prober) probeMedia(ctx context.Context, t config.Target, mediaURL, variant string) {
+	p.checkMedia(ctx, t, mediaURL, variant, p.fetch(ctx, t, mediaURL))
+}
+
+// checkMedia runs the media-playlist path against a response that has already
+// been fetched.
+//
+// It is split from the fetch so that a target which *is* a media playlist is
+// not fetched twice per cycle: ProbeTarget has to read the body to tell a
+// media playlist from a master one, and re-reading it doubled the request rate
+// against the origin for nothing. The metrics are recorded from that same
+// response, so media_fetch_seconds for such a target now reports the fetch
+// that actually happened rather than a second one made only to measure it.
+func (p *Prober) checkMedia(ctx context.Context, t config.Target, mediaURL, variant string, res fetchResult) {
 	labels := map[string]string{"target": t.Name, "variant": variant}
 
-	res := p.fetch(ctx, t, mediaURL)
 	p.reg.SetGauge("streampulse_media_fetch_seconds", "Time to fetch a media playlist", res.dur.Seconds(), labels)
 	if res.err != nil || res.status != http.StatusOK {
 		p.reg.SetGauge("streampulse_variant_up", "1 if the media playlist is reachable", 0, labels)

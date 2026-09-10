@@ -241,18 +241,16 @@ func TestMapWithoutURIIsReportedNotProbed(t *testing.T) {
 	if cap.has("init_segment_availability") {
 		t.Error("a map with no URI must not be probed as if it had one")
 	}
-	// A direct media-playlist target is fetched twice per poll as it is: once
-	// as the top-level manifest and once as the media playlist. A *third*
-	// fetch would mean the empty URI had resolved back to the playlist and
-	// been probed as an initialisation section.
+	// A second fetch of the playlist would mean the empty URI had resolved
+	// back to it and been probed as an initialisation section.
 	n := 0
 	for _, p := range h.paths() {
 		if p == "/media.m3u8" {
 			n++
 		}
 	}
-	if n != 2 {
-		t.Errorf("the playlist was fetched %d times, want 2 -- a third means the empty URI resolved back to it", n)
+	if n != 1 {
+		t.Errorf("the playlist was fetched %d times, want 1 -- more means the empty URI resolved back to it", n)
 	}
 }
 
@@ -267,5 +265,86 @@ func TestMapMissingURIReportedWithoutSampling(t *testing.T) {
 	pr.ProbeTarget(context.Background(), config.Target{Name: "fmp4", URL: origin.URL + "/media.m3u8"})
 	if !cap.has("map_missing_uri") {
 		t.Errorf("expected map_missing_uri with sampling off, got %+v", cap.findings)
+	}
+}
+
+// A target that is itself a media playlist must be fetched once per cycle, not
+// twice. ProbeTarget has to read the body to tell a media playlist from a
+// master one; re-reading it doubled the request rate against the origin.
+func TestDirectMediaPlaylistFetchedOncePerCycle(t *testing.T) {
+	origin, h := fmp4Origin(fmp4Media, nil)
+	defer origin.Close()
+
+	pr := New(metrics.New(), &capture{})
+	pr.ProbeTarget(context.Background(), config.Target{
+		Name: "direct", URL: origin.URL + "/media.m3u8", SegmentSample: 1,
+	})
+
+	n := 0
+	for _, p := range h.paths() {
+		if p == "/media.m3u8" {
+			n++
+		}
+	}
+	if n != 1 {
+		t.Errorf("the playlist was fetched %d times in one cycle, want 1", n)
+	}
+}
+
+// Splitting the fetch out must not cost the media-playlist metrics.
+func TestDirectMediaPlaylistStillReportsItsMetrics(t *testing.T) {
+	origin, _ := fmp4Origin(fmp4Media, nil)
+	defer origin.Close()
+
+	reg := metrics.New()
+	pr := New(reg, &capture{})
+	pr.ProbeTarget(context.Background(), config.Target{
+		Name: "direct", URL: origin.URL + "/media.m3u8", SegmentSample: 1,
+	})
+
+	body := scrape(t, reg)
+	for _, want := range []string{
+		`streampulse_variant_up{target="direct",variant="direct"} 1`,
+		`streampulse_media_fetch_seconds{target="direct",variant="direct"}`,
+		`streampulse_segment_count{target="direct",variant="direct"} 2`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("metrics missing %q", want)
+		}
+	}
+}
+
+// A master-based target is unaffected: one manifest fetch plus one per variant.
+func TestMasterTargetFetchCountUnchanged(t *testing.T) {
+	h := &hits{}
+	mux := http.NewServeMux()
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		h.add(r.URL.Path)
+		switch r.URL.Path {
+		case "/master.m3u8":
+			_, _ = w.Write([]byte("#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=800000,RESOLUTION=640x360\nmedia.m3u8\n"))
+		case "/media.m3u8":
+			_, _ = w.Write([]byte(fmp4Media))
+		default:
+			_, _ = w.Write([]byte("\x00\x00"))
+		}
+	})
+	origin := httptest.NewServer(mux)
+	defer origin.Close()
+
+	pr := New(metrics.New(), &capture{})
+	pr.ProbeTarget(context.Background(), config.Target{Name: "m", URL: origin.URL + "/master.m3u8"})
+
+	master, media := 0, 0
+	for _, p := range h.paths() {
+		switch p {
+		case "/master.m3u8":
+			master++
+		case "/media.m3u8":
+			media++
+		}
+	}
+	if master != 1 || media != 1 {
+		t.Errorf("fetched master %d times and media %d times, want 1 and 1", master, media)
 	}
 }
