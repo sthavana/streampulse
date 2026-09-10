@@ -1,0 +1,49 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # 1.22 is the minimum the README promises; stable catches anything
+        # that breaks on a newer toolchain. The project has no dependencies,
+        # so both are seconds.
+        go: ['1.22', 'stable']
+    name: test (go ${{ matrix.go }})
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ matrix.go }}
+          cache: true
+
+      - name: gofmt
+        run: |
+          unformatted=$(gofmt -l .)
+          if [ -n "$unformatted" ]; then
+            echo "::error::these files are not gofmt'd:"
+            echo "$unformatted"
+            exit 1
+          fi
+
+      - name: go vet
+        run: go vet ./...
+
+      # -race because the prober runs a goroutine per target over shared
+      # cross-poll state, which is exactly the kind of bug a single-threaded
+      # test run will not show.
+      - name: go test -race
+        run: go test -race ./...
+
+      - name: go build
+        run: go build ./...

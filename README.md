@@ -1,5 +1,7 @@
 # StreamPulse
 
+[![CI](https://github.com/sthavana/pulsemark/actions/workflows/ci.yml/badge.svg)](https://github.com/sthavana/pulsemark/actions/workflows/ci.yml)
+
 Proactive, synthetic health monitoring for OTT / IPTV streaming — HLS and DASH.
 
 StreamPulse continuously pulls your manifests and segments the way a player would,
@@ -447,6 +449,7 @@ Requires Go 1.22+.
 
 ```bash
 cp config.example.json config.json   # edit targets
+make check                           # gofmt + vet + tests with -race, what CI runs
 make run
 # metrics:   curl localhost:9090/metrics
 # findings:  JSON lines on stdout
