@@ -12,7 +12,7 @@ import (
 // runChecks evaluates the detection rules against one media playlist and returns
 // any findings. Stateful checks (freeze, PDT progression) compare this poll to
 // the previous one for the same playlist URL.
-func (p *Prober) runChecks(t config.Target, plURL, variant string, pl *hls.MediaPlaylist) []alert.Finding {
+func (p *Prober) runChecks(t config.Target, plURL, variant string, pl *hls.MediaPlaylist, cache cacheInfo) []alert.Finding {
 	var out []alert.Finding
 	now := p.now().UTC()
 
@@ -51,7 +51,7 @@ func (p *Prober) runChecks(t config.Target, plURL, variant string, pl *hls.Media
 	}
 
 	if live {
-		out = append(out, p.crossPollChecks(now, t, plURL, variant, pl)...)
+		out = append(out, p.crossPollChecks(now, t, plURL, variant, pl, cache)...)
 		out = append(out, edgeStalenessCheck(now, t, variant, pl)...)
 	}
 
@@ -72,7 +72,7 @@ func (p *Prober) runChecks(t config.Target, plURL, variant string, pl *hls.Media
 
 // crossPollChecks compares this poll against the stored state for the same
 // playlist URL: freeze detection, window rollback, and PDT progression.
-func (p *Prober) crossPollChecks(now time.Time, t config.Target, plURL, variant string, pl *hls.MediaPlaylist) []alert.Finding {
+func (p *Prober) crossPollChecks(now time.Time, t config.Target, plURL, variant string, pl *hls.MediaPlaylist, cache cacheInfo) []alert.Finding {
 	var out []alert.Finding
 	// Compare the projected live edge, not the raw anchor tag: packagers emit
 	// PDT sparsely (Unified Streaming tags only discontinuity boundaries, ~11
@@ -103,7 +103,7 @@ func (p *Prober) crossPollChecks(now time.Time, t config.Target, plURL, variant 
 		// serving a stale cache. Distinct from a frozen edge, and always a fault.
 		out = append(out, finding(now, t, variant, alert.Critical, "playlist_rollback",
 			"media sequence went backwards, "+itoa(st.lastSequence)+" -> "+itoa(pl.MediaSequence)+
-				" (stale origin or failover)"))
+				" (stale origin or failover)"+cache.describe()))
 		st.lastSequence = pl.MediaSequence
 		st.lastSeqChange = now
 
@@ -115,7 +115,8 @@ func (p *Prober) crossPollChecks(now time.Time, t config.Target, plURL, variant 
 		threshold := time.Duration(3*maxInt(pl.TargetDuration, 2)) * time.Second
 		if stalled > threshold {
 			out = append(out, finding(now, t, variant, alert.Critical, "playlist_stalled",
-				"media sequence has not advanced for "+ftoa(stalled.Seconds())+"s (live edge frozen)"))
+				"media sequence has not advanced for "+ftoa(stalled.Seconds())+"s (live edge frozen)"+
+					cache.explain(stalled)))
 		}
 	}
 

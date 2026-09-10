@@ -28,6 +28,14 @@ type Target struct {
 	RenditionTypes  []string `json:"rendition_types"` // e.g. ["AUDIO"]; empty = every type
 	SegmentSample   int      `json:"segment_sample"`  // segments per variant to fetch-check (0 = none)
 
+	// NoCache sends Cache-Control: no-cache, bypassing the CDN edge. Off by
+	// default on purpose: viewers do not watch the origin, so a stale edge is
+	// a real outage and a prober that never sees one is measuring the wrong
+	// thing. Turn it on for a second target pointed past the cache, and
+	// compare the two.
+	NoCache bool              `json:"no_cache,omitempty"`
+	Headers map[string]string `json:"headers,omitempty"` // extra request headers (auth tokens, CDN overrides)
+
 	// DASH. MaxRepresentations is per adaptation set rather than per
 	// manifest: a flat cap on a ladder that lists video before audio would
 	// silently stop probing audio altogether, which is the break this tool

@@ -112,12 +112,12 @@ func TestPDTNotAdvancingSilentOnIdenticalConsecutivePolls(t *testing.T) {
 	pr, clk := newTestProber(anchor.Add(36 * time.Second))
 
 	pl := livePlaylist(100, 6, 6, 6.0, &anchor)
-	pr.runChecks(target, "u", "v", pl) // baseline poll
+	pr.runChecks(target, "u", "v", pl, cacheInfo{}) // baseline poll
 
 	// Poll again 2s later, faster than the 6s segment duration: the packager has
 	// not published a new segment yet, so the identical playlist is correct.
 	clk.advance(2 * time.Second)
-	fs := pr.runChecks(target, "u", "v", pl)
+	fs := pr.runChecks(target, "u", "v", pl, cacheInfo{})
 
 	if hasCheck(fs, "pdt_not_advancing") {
 		t.Errorf("pdt_not_advancing fired on an unchanged playlist: %v", checks(fs))
@@ -131,11 +131,11 @@ func TestPDTNotAdvancingFiresWhenWindowMovesButPDTFrozen(t *testing.T) {
 	anchor := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 	pr, clk := newTestProber(anchor.Add(36 * time.Second))
 
-	pr.runChecks(target, "u", "v", livePlaylist(100, 6, 6, 6.0, &anchor))
+	pr.runChecks(target, "u", "v", livePlaylist(100, 6, 6, 6.0, &anchor), cacheInfo{})
 
 	// Sequence advances but the packager re-emits the same PDT: a real fault.
 	clk.advance(6 * time.Second)
-	fs := pr.runChecks(target, "u", "v", livePlaylist(101, 6, 6, 6.0, &anchor))
+	fs := pr.runChecks(target, "u", "v", livePlaylist(101, 6, 6, 6.0, &anchor), cacheInfo{})
 
 	if !hasCheck(fs, "pdt_not_advancing") {
 		t.Fatalf("expected pdt_not_advancing, got %v", checks(fs))
@@ -146,12 +146,12 @@ func TestPDTAdvancingNormallyIsSilent(t *testing.T) {
 	anchor := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 	pr, clk := newTestProber(anchor.Add(36 * time.Second))
 
-	pr.runChecks(target, "u", "v", livePlaylist(100, 6, 6, 6.0, &anchor))
+	pr.runChecks(target, "u", "v", livePlaylist(100, 6, 6, 6.0, &anchor), cacheInfo{})
 
 	// A healthy slide: sequence +1 and the anchor PDT moves forward one segment.
 	clk.advance(6 * time.Second)
 	next := anchor.Add(6 * time.Second)
-	fs := pr.runChecks(target, "u", "v", livePlaylist(101, 6, 6, 6.0, &next))
+	fs := pr.runChecks(target, "u", "v", livePlaylist(101, 6, 6, 6.0, &next), cacheInfo{})
 
 	if len(fs) != 0 {
 		t.Errorf("expected a clean poll, got %v", checks(fs))
@@ -165,11 +165,11 @@ func TestPlaylistStalledFiresPastThreshold(t *testing.T) {
 	pr, clk := newTestProber(anchor.Add(36 * time.Second))
 	pl := livePlaylist(100, 6, 6, 6.0, nil)
 
-	pr.runChecks(target, "u", "v", pl)
+	pr.runChecks(target, "u", "v", pl, cacheInfo{})
 
 	// Threshold is 3 x TARGETDURATION = 18s; go past it with the same playlist.
 	clk.advance(20 * time.Second)
-	fs := pr.runChecks(target, "u", "v", pl)
+	fs := pr.runChecks(target, "u", "v", pl, cacheInfo{})
 
 	if !hasCheck(fs, "playlist_stalled") {
 		t.Fatalf("expected playlist_stalled, got %v", checks(fs))
@@ -181,9 +181,9 @@ func TestPlaylistStalledSilentInsideThreshold(t *testing.T) {
 	pr, clk := newTestProber(anchor.Add(36 * time.Second))
 	pl := livePlaylist(100, 6, 6, 6.0, nil)
 
-	pr.runChecks(target, "u", "v", pl)
+	pr.runChecks(target, "u", "v", pl, cacheInfo{})
 	clk.advance(10 * time.Second) // inside the 18s threshold
-	fs := pr.runChecks(target, "u", "v", pl)
+	fs := pr.runChecks(target, "u", "v", pl, cacheInfo{})
 
 	if hasCheck(fs, "playlist_stalled") {
 		t.Errorf("playlist_stalled fired inside the threshold: %v", checks(fs))
@@ -196,11 +196,11 @@ func TestPlaylistRollbackFiresAndIsNotReportedAsStalled(t *testing.T) {
 	anchor := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 	pr, clk := newTestProber(anchor.Add(36 * time.Second))
 
-	pr.runChecks(target, "u", "v", livePlaylist(100, 6, 6, 6.0, nil))
+	pr.runChecks(target, "u", "v", livePlaylist(100, 6, 6, 6.0, nil), cacheInfo{})
 
 	// Origin failover serves an older window.
 	clk.advance(6 * time.Second)
-	fs := pr.runChecks(target, "u", "v", livePlaylist(90, 6, 6, 6.0, nil))
+	fs := pr.runChecks(target, "u", "v", livePlaylist(90, 6, 6, 6.0, nil), cacheInfo{})
 
 	if !hasCheck(fs, "playlist_rollback") {
 		t.Fatalf("expected playlist_rollback, got %v", checks(fs))
@@ -219,13 +219,13 @@ func TestRollbackResetsBaselineSoRecoveryIsClean(t *testing.T) {
 	anchor := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 	pr, clk := newTestProber(anchor.Add(36 * time.Second))
 
-	pr.runChecks(target, "u", "v", livePlaylist(100, 6, 6, 6.0, nil))
+	pr.runChecks(target, "u", "v", livePlaylist(100, 6, 6, 6.0, nil), cacheInfo{})
 	clk.advance(6 * time.Second)
-	pr.runChecks(target, "u", "v", livePlaylist(90, 6, 6, 6.0, nil)) // rollback
+	pr.runChecks(target, "u", "v", livePlaylist(90, 6, 6, 6.0, nil), cacheInfo{}) // rollback
 
 	// The stale origin keeps serving, now advancing normally from 90.
 	clk.advance(6 * time.Second)
-	fs := pr.runChecks(target, "u", "v", livePlaylist(91, 6, 6, 6.0, nil))
+	fs := pr.runChecks(target, "u", "v", livePlaylist(91, 6, 6, 6.0, nil), cacheInfo{})
 
 	if len(fs) != 0 {
 		t.Errorf("expected recovery to be silent, got %v", checks(fs))
@@ -238,7 +238,7 @@ func TestFirstPollEstablishesBaselineWithoutCrossPollFindings(t *testing.T) {
 	anchor := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 	pr, _ := newTestProber(anchor.Add(36 * time.Second))
 
-	fs := pr.runChecks(target, "u", "v", livePlaylist(100, 6, 6, 6.0, &anchor))
+	fs := pr.runChecks(target, "u", "v", livePlaylist(100, 6, 6, 6.0, &anchor), cacheInfo{})
 
 	for _, name := range []string{"playlist_stalled", "playlist_rollback", "pdt_not_advancing"} {
 		if hasCheck(fs, name) {
@@ -295,7 +295,7 @@ func TestSparsePDTSlidingWindowDoesNotWarn(t *testing.T) {
 	// pdt_not_advancing on every poll.
 	for i := 0; i < 8; i++ {
 		pl := sparsePDTWindow(i, segs, pdtEvery, segDur, epoch, 3)
-		fs := pr.runChecks(target, "u", "v", pl)
+		fs := pr.runChecks(target, "u", "v", pl, cacheInfo{})
 		if hasCheck(fs, "pdt_not_advancing") {
 			t.Fatalf("poll %d: pdt_not_advancing fired on a healthy sparse-PDT stream: %v", i, checks(fs))
 		}
@@ -313,7 +313,7 @@ func TestSparsePDTFrozenTimelineStillWarns(t *testing.T) {
 	start := epoch.Add(time.Duration(float64(segs) * segDur * float64(time.Second)))
 	pr, clk := newTestProber(start)
 
-	pr.runChecks(target, "u", "v", sparsePDTWindow(0, segs, pdtEvery, segDur, epoch, 3))
+	pr.runChecks(target, "u", "v", sparsePDTWindow(0, segs, pdtEvery, segDur, epoch, 3), cacheInfo{})
 
 	// Sequence advances, but the packager republishes the same PDT timeline:
 	// the window slid without the clock moving. A genuine fault.
@@ -321,7 +321,7 @@ func TestSparsePDTFrozenTimelineStillWarns(t *testing.T) {
 	frozen := sparsePDTWindow(0, segs, pdtEvery, segDur, epoch, 3)
 	frozen.MediaSequence = 1
 
-	fs := pr.runChecks(target, "u", "v", frozen)
+	fs := pr.runChecks(target, "u", "v", frozen, cacheInfo{})
 	if !hasCheck(fs, "pdt_not_advancing") {
 		t.Fatalf("expected pdt_not_advancing on a frozen timeline, got %v", checks(fs))
 	}

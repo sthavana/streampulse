@@ -29,7 +29,7 @@ func dashManifestChecks(now time.Time, t config.Target, m *dash.MPD) []alert.Fin
 // dashRepChecks evaluates the per-representation rules, including the ones
 // that compare this poll against the last.
 func (p *Prober) dashRepChecks(now time.Time, t config.Target, key, variant string,
-	r *dash.Representation, segs []dash.Segment) []alert.Finding {
+	r *dash.Representation, segs []dash.Segment, cache cacheInfo) []alert.Finding {
 
 	var out []alert.Finding
 	if len(segs) == 0 {
@@ -41,7 +41,7 @@ func (p *Prober) dashRepChecks(now time.Time, t config.Target, key, variant stri
 		out = append(out, finding(now, t, variant, alert.Warning, "short_window",
 			"window "+ftoa(window.Seconds())+"s is below the expected "+ftoa(t.MinWindowSec)+"s"))
 	}
-	return append(out, p.dashEdgeChecks(now, t, key, variant, r, segs)...)
+	return append(out, p.dashEdgeChecks(now, t, key, variant, r, segs, cache)...)
 }
 
 // dashEdgeChecks is freeze and rollback detection for DASH.
@@ -61,7 +61,7 @@ func (p *Prober) dashRepChecks(now time.Time, t config.Target, key, variant stri
 // computed edge every poll, and a packager that has stopped publishing fails
 // that fetch. segment_availability is the freeze check for those streams.
 func (p *Prober) dashEdgeChecks(now time.Time, t config.Target, key, variant string,
-	r *dash.Representation, segs []dash.Segment) []alert.Finding {
+	r *dash.Representation, segs []dash.Segment, cache cacheInfo) []alert.Finding {
 
 	tick, ok := manifestEdge(r, segs)
 	if !ok {
@@ -101,7 +101,7 @@ func (p *Prober) dashEdgeChecks(now time.Time, t config.Target, key, variant str
 		// serving a stale cache. Distinct from a freeze, and always a fault.
 		out = append(out, finding(now, t, variant, alert.Critical, "playlist_rollback",
 			"timeline went backwards, tick "+i64toa(st.tick)+" -> "+i64toa(tick)+
-				" (stale origin or failover)"))
+				" (stale origin or failover)"+cache.describe()))
 		st.tick, st.lastChange = tick, now
 
 	default:
@@ -111,7 +111,8 @@ func (p *Prober) dashEdgeChecks(now time.Time, t config.Target, key, variant str
 		stalled := now.Sub(st.lastChange)
 		if stalled > threshold {
 			out = append(out, finding(now, t, variant, alert.Critical, "playlist_stalled",
-				"timeline has not advanced for "+ftoa(stalled.Seconds())+"s (live edge frozen)"))
+				"timeline has not advanced for "+ftoa(stalled.Seconds())+"s (live edge frozen)"+
+					cache.explain(stalled)))
 		}
 	}
 	return out

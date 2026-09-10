@@ -33,6 +33,8 @@ const (
 	helpSegmentTTFB   = "Time-to-first-byte for a sampled segment"
 	helpKeyCount      = "Distinct encrypting keys (HLS) or DRM systems (DASH) in force"
 	helpInitUp        = "1 if the initialisation segment is fetchable"
+	helpManifestAge   = "Age header on the manifest response: seconds since the origin generated it"
+	helpCacheHit      = "1 if the manifest response was a CDN cache hit, 0 if a miss"
 )
 
 type Prober struct {
@@ -76,24 +78,40 @@ func New(reg *metrics.Registry, n alert.Notifier) *Prober {
 func (p *Prober) ProbeTarget(ctx context.Context, t config.Target) {
 	labels := map[string]string{"target": t.Name}
 
-	raw, dur, status, err := p.fetch(ctx, t.URL)
-	p.reg.SetGauge("streampulse_manifest_fetch_seconds", helpManifestFetch, dur.Seconds(), labels)
-	if err != nil || status != http.StatusOK {
+	res := p.fetch(ctx, t, t.URL)
+	p.reg.SetGauge("streampulse_manifest_fetch_seconds", helpManifestFetch, res.dur.Seconds(), labels)
+	if res.err != nil || res.status != http.StatusOK {
 		p.reg.SetGauge("streampulse_probe_up", helpProbeUp, 0, labels)
-		msg := "manifest returned HTTP " + itoa(status)
-		if err != nil {
-			msg = err.Error()
+		msg := "manifest returned HTTP " + itoa(res.status)
+		if res.err != nil {
+			msg = res.err.Error()
 		}
 		p.emit(t.Name, "", alert.Critical, "manifest_fetch", msg)
 		return
 	}
 	p.reg.SetGauge("streampulse_probe_up", helpProbeUp, 1, labels)
+	p.recordCache(labels, res.cache)
 
-	if isDASH(t, raw) {
-		p.probeDASH(ctx, t, raw)
+	if isDASH(t, res.body) {
+		p.probeDASH(ctx, t, res)
 		return
 	}
-	p.probeHLS(ctx, t, raw)
+	p.probeHLS(ctx, t, res)
+}
+
+// recordCache exports what the CDN said about this response's freshness. Age
+// is the series worth graphing: a step change in it is an edge that stopped
+// revalidating, which is visible well before anything times out.
+func (p *Prober) recordCache(labels map[string]string, c cacheInfo) {
+	if c.HasAge {
+		p.reg.SetGauge("streampulse_manifest_age_seconds", helpManifestAge, c.Age.Seconds(), labels)
+	}
+	switch c.Hit {
+	case "HIT", "STALE":
+		p.reg.SetGauge("streampulse_manifest_cache_hit", helpCacheHit, 1, labels)
+	case "MISS":
+		p.reg.SetGauge("streampulse_manifest_cache_hit", helpCacheHit, 0, labels)
+	}
 }
 
 // isDASH decides which parser a response belongs to. An explicit target type
@@ -111,7 +129,8 @@ func isDASH(t config.Target, raw string) bool {
 	return dash.LooksLikeMPD([]byte(raw))
 }
 
-func (p *Prober) probeHLS(ctx context.Context, t config.Target, raw string) {
+func (p *Prober) probeHLS(ctx context.Context, t config.Target, res fetchResult) {
+	raw := res.body
 	labels := map[string]string{"target": t.Name}
 
 	switch hls.DetectType(raw) {
@@ -150,21 +169,22 @@ func (p *Prober) probeHLS(ctx context.Context, t config.Target, raw string) {
 func (p *Prober) probeMedia(ctx context.Context, t config.Target, mediaURL, variant string) {
 	labels := map[string]string{"target": t.Name, "variant": variant}
 
-	raw, dur, status, err := p.fetch(ctx, mediaURL)
-	p.reg.SetGauge("streampulse_media_fetch_seconds", "Time to fetch a media playlist", dur.Seconds(), labels)
-	if err != nil || status != http.StatusOK {
+	res := p.fetch(ctx, t, mediaURL)
+	p.reg.SetGauge("streampulse_media_fetch_seconds", "Time to fetch a media playlist", res.dur.Seconds(), labels)
+	if res.err != nil || res.status != http.StatusOK {
 		p.reg.SetGauge("streampulse_variant_up", "1 if the media playlist is reachable", 0, labels)
-		p.emit(t.Name, variant, alert.Critical, "media_fetch", "media playlist fetch failed (HTTP "+itoa(status)+")")
+		p.emit(t.Name, variant, alert.Critical, "media_fetch", "media playlist fetch failed (HTTP "+itoa(res.status)+")")
 		return
 	}
 	p.reg.SetGauge("streampulse_variant_up", "1 if the media playlist is reachable", 1, labels)
+	p.recordCache(labels, res.cache)
 
-	pl := hls.ParseMedia(raw)
+	pl := hls.ParseMedia(res.body)
 	p.reg.SetGauge("streampulse_media_sequence", helpSequence, float64(pl.MediaSequence), labels)
 	p.reg.SetGauge("streampulse_playlist_window_seconds", helpWindow, pl.Duration(), labels)
 	p.reg.SetGauge("streampulse_segment_count", helpSegmentCount, float64(len(pl.Segments)), labels)
 
-	for _, f := range p.runChecks(t, mediaURL, variant, pl) {
+	for _, f := range p.runChecks(t, mediaURL, variant, pl, res.cache) {
 		p.record(f)
 	}
 	for _, f := range p.keyChecks(ctx, t, mediaURL, variant, pl) {
@@ -207,19 +227,60 @@ func (p *Prober) sampleSegments(ctx context.Context, t config.Target, variant st
 
 // --- HTTP helpers ---
 
-func (p *Prober) fetch(ctx context.Context, u string) (body string, dur time.Duration, status int, err error) {
+// fetchResult is one manifest fetch. The cache headers travel with the body
+// because the checks that need them run several calls further down.
+type fetchResult struct {
+	body   string
+	status int
+	dur    time.Duration
+	cache  cacheInfo
+	err    error
+}
+
+func (p *Prober) fetch(ctx context.Context, t config.Target, u string) fetchResult {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
 	if err != nil {
-		return "", 0, 0, err
+		return fetchResult{err: err}
 	}
+	applyHeaders(req, t)
+
 	start := time.Now()
 	resp, err := p.client.Do(req)
 	if err != nil {
-		return "", time.Since(start), 0, err
+		return fetchResult{dur: time.Since(start), err: err}
 	}
 	defer resp.Body.Close()
 	b, err := io.ReadAll(resp.Body)
-	return string(b), time.Since(start), resp.StatusCode, err
+	return fetchResult{
+		body:   string(b),
+		status: resp.StatusCode,
+		dur:    time.Since(start),
+		cache:  readCache(resp.Header),
+		err:    err,
+	}
+}
+
+// userAgent identifies probe traffic in an operator's access logs. Synthetic
+// requests that look like a player are hard to separate from real viewers when
+// someone is reading origin logs during an incident.
+const userAgent = "StreamPulse/0.1 (synthetic prober)"
+
+// applyHeaders sets the request headers for a target.
+//
+// NoCache is opt-in rather than the default. Bypassing the edge would measure
+// the origin, but viewers do not watch the origin: a stale edge is a real
+// outage, and a prober that never sees one is measuring the wrong thing. The
+// option exists so a second target can be pointed past the cache deliberately,
+// and the two compared.
+func applyHeaders(req *http.Request, t config.Target) {
+	req.Header.Set("User-Agent", userAgent)
+	if t.NoCache {
+		req.Header.Set("Cache-Control", "no-cache")
+		req.Header.Set("Pragma", "no-cache")
+	}
+	for k, v := range t.Headers {
+		req.Header.Set(k, v)
+	}
 }
 
 // probeSegment measures availability and approximate time-to-first-byte using a

@@ -18,10 +18,10 @@ import (
 // playlist per variant, this one goes straight from the manifest to segments.
 // That is why streampulse_variant_up and streampulse_media_fetch_seconds have
 // no DASH equivalent -- there is no per-representation manifest to be up.
-func (p *Prober) probeDASH(ctx context.Context, t config.Target, raw string) {
+func (p *Prober) probeDASH(ctx context.Context, t config.Target, res fetchResult) {
 	labels := map[string]string{"target": t.Name}
 
-	m, err := dash.Parse([]byte(raw), t.URL)
+	m, err := dash.Parse([]byte(res.body), t.URL)
 	if err != nil {
 		p.emit(t.Name, "", alert.Critical, "manifest_parse", "MPD did not parse: "+err.Error())
 		return
@@ -43,13 +43,13 @@ func (p *Prober) probeDASH(ctx context.Context, t config.Target, raw string) {
 		p.record(f)
 	}
 	for _, r := range selectRepresentations(t, m) {
-		p.probeRepresentation(ctx, t, r, now)
+		p.probeRepresentation(ctx, t, r, now, res.cache)
 	}
 }
 
 // probeRepresentation records the state of one representation and fetch-checks
 // its most recent segments.
-func (p *Prober) probeRepresentation(ctx context.Context, t config.Target, r *dash.Representation, now time.Time) {
+func (p *Prober) probeRepresentation(ctx context.Context, t config.Target, r *dash.Representation, now time.Time, cache cacheInfo) {
 	variant := r.Label()
 	labels := map[string]string{"target": t.Name, "variant": variant}
 
@@ -68,7 +68,7 @@ func (p *Prober) probeRepresentation(ctx context.Context, t config.Target, r *da
 	p.reg.SetGauge("streampulse_media_sequence", helpSequence, float64(last.Number), labels)
 	p.reg.SetGauge("streampulse_playlist_window_seconds", helpWindow, (last.End() - segs[0].Start).Seconds(), labels)
 
-	for _, f := range p.dashRepChecks(now, t, edgeKey(t, variant), variant, r, segs) {
+	for _, f := range p.dashRepChecks(now, t, edgeKey(t, variant), variant, r, segs, cache) {
 		p.record(f)
 	}
 	for _, f := range p.dashDRMChecks(now, t, r, variant) {

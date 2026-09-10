@@ -289,6 +289,60 @@ leaves that one attribute unset rather than costing the whole manifest, and a
 dynamic MPD with no `@availabilityStartTime` is read as fully available rather
 than as empty. Deciding that either is *wrong* is a check's job, not a parser's.
 
+## Which layer broke: cache attribution
+
+A frozen manifest has two very different causes that look identical from a
+prober: the **packager** stopped producing, or a **CDN edge** is serving a
+stale cached copy of a manifest the origin is still updating. Both are real
+faults -- players hitting that edge see the same frozen stream -- but they are
+different teams' problems at 3am, and "the live edge is frozen" does not say
+which.
+
+The answer is usually sitting in the response headers, so StreamPulse reads
+them and puts the verdict in the finding:
+
+```
+playlist_stalled  media sequence has not advanced for 42.0s (live edge frozen)
+                  [cache: Age 1.0s, MISS -- fresher than the freeze, so the origin is serving it]
+
+playlist_stalled  timeline has not advanced for 44.0s (live edge frozen)
+                  [cache: Age 120.0s, HIT -- old enough to account for the freeze; check the origin before the packager]
+```
+
+The reasoning is only as strong as the `Age` header, and is worded as evidence
+rather than a verdict. If the response we just read is *younger* than the
+freeze, the origin generated this frozen manifest moments ago and the packager
+is at fault. If it is at least as old as the freeze, one stale cached object
+could account for everything we have seen. An edge that says outright it is
+past its TTL (nginx's `STALE` and `UPDATING`) settles it by itself.
+
+Hit/miss is read from whichever header the CDN uses -- `X-Cache`, `X-Cached`,
+`CF-Cache-Status`, `X-Cache-Status` -- normalised to HIT / STALE / MISS. In a
+CDN chain (`X-Cache: HIT, MISS`) only the last entry counts: that is the edge
+that actually served us. Not every CDN says anything at all -- Akamai strips
+these by default -- and when nothing is said, nothing is claimed.
+
+Exported as `streampulse_manifest_age_seconds` and
+`streampulse_manifest_cache_hit`. Age is the one worth graphing: a step change
+in it is an edge that stopped revalidating, and it shows up well before
+anything times out.
+
+Two per-target knobs:
+
+```json
+"no_cache": false,                       // send Cache-Control: no-cache
+"headers": { "X-Auth": "token" }         // extra request headers
+```
+
+`no_cache` is **off** by default, and deliberately so. Bypassing the edge would
+measure the origin, but viewers do not watch the origin: a stale edge is a real
+outage, and a prober that never sees one is measuring the wrong thing. Turn it
+on for a *second* target aimed past the cache, and compare the two -- that pair
+is the cleanest origin-vs-edge signal available without instrumenting the CDN.
+
+Probe requests identify themselves as `StreamPulse/0.1 (synthetic prober)`, so
+they can be separated from real viewers in an origin access log.
+
 ## Alerting: incidents, not findings
 
 A prober re-observes a fault on every poll. Sent straight to Slack, one frozen
@@ -373,6 +427,7 @@ matches is worse than one that refuses to load.
 ## Metrics exposed (`/metrics`)
 
 `streampulse_probe_up`, `streampulse_variant_up`, `streampulse_manifest_fetch_seconds`,
+`streampulse_manifest_age_seconds`, `streampulse_manifest_cache_hit`,
 `streampulse_media_fetch_seconds`, `streampulse_media_sequence`,
 `streampulse_playlist_window_seconds`, `streampulse_segment_count`,
 `streampulse_segment_available`, `streampulse_segment_ttfb_seconds`,
@@ -456,6 +511,7 @@ Packages: `hls` and `dash` (manifest parsers), `probe` (prober + checks),
 - **Deep segment inspection**: decode a frame (ffprobe) for black/freeze, codec/res vs declared, PTS continuity
 - **Multi-vantage probing** (run from several regions; compare)
 - **Cross-layer correlation**: map a QoE symptom to the offending layer
+  (started: manifest findings already carry an origin-vs-edge verdict)
 - **Web UI** over the incident state the tracker already keeps
 
 ## Status
