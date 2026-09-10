@@ -179,11 +179,57 @@ windows and metrics as the HLS path.
 | `pssh_malformed` / `pssh_empty` | warning | `cenc:pssh` fails to parse or carries nothing |
 | `kid_invalid` | warning | `default_KID` is not a key id |
 | `discontinuity_present` | info | More than one period (each boundary is a splice point) |
+| `chunked_delivery_missing` | warning | A low-latency stream is being delivered as whole buffered segments |
+| `utc_timing_missing` | warning | Low-latency stream declares no `UTCTiming` |
 
 `edge_stale` is the DASH counterpart of HLS's `pdt_stale`. The names differ
 because `pdt_stale` names a tag DASH does not have; they could be unified under
 one name later, but renaming a check breaks existing alert rules, so it is left
 as a deliberate decision rather than done quietly.
+
+### Low latency
+
+A chunked low-latency stream declares itself two ways, and either is enough
+because packagers are inconsistent about which they emit: a
+`ServiceDescription/Latency` target, or a `SegmentTemplate` with
+`availabilityTimeComplete="false"` and an offset. An offset on its own is not
+low latency -- it means whole segments published slightly early, which is a
+different thing and is not judged by these rules.
+
+**`chunked_delivery_missing` is the one worth having.** If the packager, or any
+proxy in front of it, buffers each segment and only answers once it is
+complete, nothing appears to break: the manifest is right, every segment
+serves, players play. They just play seconds behind where the design says, and
+the entire low-latency build is inert. No other check can see it, because
+nothing is wrong with any individual response -- only with when it started
+arriving.
+
+The signal is the response declaring its own length. A segment still being
+produced cannot have a known length, so a `Content-Length` on one means
+something waited for the whole thing. That requires a plain GET: the range
+request every other probe uses always comes back with a length, whatever the
+origin would have done otherwise. Only a segment whose production has not
+finished can answer the question, so a poll that finds none simply says
+nothing rather than judging a completed segment for having a length it is
+entitled to.
+
+**Latency bounds tighten the staleness check.** A stream that declares
+`Latency@max` has said what "too far behind" means for it, and that replaces
+the generic 30s floor -- which, on a three-second target, is not conservative
+but blind. `edge_stale` names the declared bound in its message.
+
+That measurement is taken from when a segment *finishes* being produced, not
+from when it becomes fetchable. The two differ by exactly
+`@availabilityTimeOffset` on a low-latency stream, and measuring from the
+earlier one would charge the offset against the stream twice -- reporting
+something inside its latency budget as failing it, on every poll.
+
+`UTCTiming` is required of these streams and not of ordinary ones: low-latency
+playback is anchored to wall clock, and at a three-second target a few seconds
+of client drift is the entire budget. An ordinary stream has seconds of buffer
+to absorb the same drift.
+
+Exported as `streampulse_chunked_delivery`.
 
 ### DRM
 
@@ -460,7 +506,7 @@ matches is worse than one that refuses to load.
 `streampulse_period_count`, `streampulse_representation_count`,
 `streampulse_findings_total`,
 `streampulse_key_count`, `streampulse_key_available`,
-`streampulse_init_segment_available`,
+`streampulse_init_segment_available`, `streampulse_chunked_delivery`,
 `streampulse_key_fetch_seconds`,
 `streampulse_incident_active`, `streampulse_incidents_opened_total`,
 `streampulse_incidents_resolved_total`, `streampulse_maintenance_active`,
@@ -529,8 +575,6 @@ Packages: `hls` and `dash` (manifest parsers), `probe` (prober + checks),
 
 ## Roadmap
 
-- **Low-latency DASH** -- chunked `availabilityTimeOffset` streams are parsed
-  but their sub-segment timing is not checked
 - **MPEG-TS / IPTV**: TR 101 290 P1/P2/P3-style checks (PCR jitter, CC errors, PAT/PMT integrity) via TSDuck
 - **Deep segment inspection**: decode a frame (ffprobe) for black/freeze, codec/res vs declared, PTS continuity
 - **Multi-vantage probing** (run from several regions; compare)

@@ -35,6 +35,7 @@ const (
 	helpInitUp        = "1 if the initialisation segment is fetchable"
 	helpManifestAge   = "Age header on the manifest response: seconds since the origin generated it"
 	helpCacheHit      = "1 if the manifest response was a CDN cache hit, 0 if a miss"
+	helpChunked       = "1 if a low-latency segment is delivered chunked, 0 if buffered whole"
 )
 
 type Prober struct {
@@ -367,6 +368,29 @@ func (p *Prober) probeInit(ctx context.Context, t config.Target, variant, initUR
 		return
 	}
 	p.reg.SetGauge("streampulse_init_segment_available", helpInitUp, 1, labels)
+}
+
+// probeStreaming asks for a resource without a Range header and reports
+// whether the response declared its length, then abandons the body.
+//
+// The Range request every other probe uses cannot answer this question: a
+// range response always carries a length, whatever the origin would have done
+// for a whole-resource request. And the body must not be read -- on a segment
+// still being produced it would not end until production did.
+func (p *Prober) probeStreaming(ctx context.Context, t config.Target, u string) (length int64, status int, err error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
+	if err != nil {
+		return 0, 0, err
+	}
+	applyHeaders(req, t)
+	resp, err := p.client.Do(req)
+	if err != nil {
+		return 0, 0, err
+	}
+	// Headers are in; the body is of no interest and may not have been
+	// written yet.
+	_ = resp.Body.Close()
+	return resp.ContentLength, resp.StatusCode, nil
 }
 
 // --- finding delivery ---

@@ -16,6 +16,16 @@ func dashManifestChecks(now time.Time, t config.Target, m *dash.MPD) []alert.Fin
 			`expected a live stream but the MPD declares type="static"`))
 	}
 
+	// Low-latency playback is anchored to wall clock: a player computes the
+	// live edge from availabilityStartTime and its own clock, and at a
+	// three-second target a few seconds of drift is the whole latency budget.
+	// UTCTiming is how the manifest tells it whose clock to trust, and
+	// without one every viewer is guessing from their own.
+	if m.Dynamic() && m.LowLatency() && len(m.UTCTimings) == 0 {
+		out = append(out, finding(now, t, "", alert.Warning, "utc_timing_missing",
+			"low-latency stream declares no UTCTiming, so players must trust their own clocks"))
+	}
+
 	// Period boundaries are DASH's splice points -- the same ad-break
 	// awareness EXT-X-DISCONTINUITY gives on the HLS side, so it reuses that
 	// check name rather than inventing a parallel vocabulary for one concept.
@@ -78,10 +88,14 @@ func (p *Prober) dashEdgeChecks(now time.Time, t config.Target, key, variant str
 	// How far behind wall clock the packager's own edge is. Distinct from a
 	// freeze: an encoder that is falling behind but still publishing produces
 	// a timeline that advances, just never fast enough to catch up.
-	if !last.Available.IsZero() {
-		if behind := now.Sub(last.Available); behind > stalenessThreshold(last.Duration, r.Period().MPD()) {
+	// Measured from CompleteAt, not Available: on a low-latency stream
+	// Available is shifted earlier by @availabilityTimeOffset, which would
+	// flatter the measurement by exactly the amount the offset claims.
+	if !last.CompleteAt.IsZero() {
+		m := r.Period().MPD()
+		if behind := now.Sub(last.CompleteAt); behind > stalenessThreshold(last.Duration, m) {
 			out = append(out, finding(now, t, variant, alert.Warning, "edge_stale",
-				"live edge is "+ftoa(behind.Seconds())+"s behind wall-clock"))
+				"live edge is "+ftoa(behind.Seconds())+"s behind wall-clock"+declaredLatency(m)))
 		}
 	}
 
@@ -175,6 +189,19 @@ func stallThreshold(segment time.Duration, mup dash.Duration) time.Duration {
 // frozen, and the segments all exist. That fault grows to tens of seconds and
 // then minutes, so a 30s floor loses nothing worth having.
 func stalenessThreshold(segment time.Duration, m *dash.MPD) time.Duration {
+	// A stream that declares its latency has told us what "behind" means for
+	// it, and that beats any floor invented here. On a three-second target
+	// the generic 30s floor is not conservative, it is blind.
+	if max, ok := m.MaxLatency(); ok {
+		return max
+	}
+	if target, ok := m.Latency(); ok {
+		if d := 2 * target; d > 4*segment {
+			return d
+		}
+		return 4 * segment
+	}
+
 	d := 30 * time.Second
 	if s := 4 * segment; s > d {
 		d = s
@@ -187,6 +214,18 @@ func stalenessThreshold(segment time.Duration, m *dash.MPD) time.Duration {
 		}
 	}
 	return d
+}
+
+// declaredLatency names the operator's own bound in a finding, so the number
+// in the message can be read against what they asked for.
+func declaredLatency(m *dash.MPD) string {
+	if max, ok := m.MaxLatency(); ok {
+		return " (declared max " + ftoa(max.Seconds()) + "s)"
+	}
+	if target, ok := m.Latency(); ok {
+		return " (declared target " + ftoa(target.Seconds()) + "s)"
+	}
+	return ""
 }
 
 // edgeKey identifies one representation's edge state across polls. The target

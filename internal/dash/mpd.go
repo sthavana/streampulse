@@ -27,23 +27,24 @@ import (
 
 // MPD is a parsed media presentation description.
 type MPD struct {
-	XMLName                    xml.Name    `xml:"MPD"`
-	ID                         string      `xml:"id,attr"`
-	Type                       string      `xml:"type,attr"`
-	Profiles                   string      `xml:"profiles,attr"`
-	AvailabilityStartTime      DateTime    `xml:"availabilityStartTime,attr"`
-	AvailabilityEndTime        DateTime    `xml:"availabilityEndTime,attr"`
-	PublishTime                DateTime    `xml:"publishTime,attr"`
-	MinimumUpdatePeriod        Duration    `xml:"minimumUpdatePeriod,attr"`
-	MinBufferTime              Duration    `xml:"minBufferTime,attr"`
-	TimeShiftBufferDepth       Duration    `xml:"timeShiftBufferDepth,attr"`
-	SuggestedPresentationDelay Duration    `xml:"suggestedPresentationDelay,attr"`
-	MediaPresentationDuration  Duration    `xml:"mediaPresentationDuration,attr"`
-	MaxSegmentDuration         Duration    `xml:"maxSegmentDuration,attr"`
-	BaseURLs                   []string    `xml:"BaseURL"`
-	Locations                  []string    `xml:"Location"`
-	UTCTimings                 []UTCTiming `xml:"UTCTiming"`
-	Periods                    []*Period   `xml:"Period"`
+	XMLName                    xml.Name             `xml:"MPD"`
+	ID                         string               `xml:"id,attr"`
+	Type                       string               `xml:"type,attr"`
+	Profiles                   string               `xml:"profiles,attr"`
+	AvailabilityStartTime      DateTime             `xml:"availabilityStartTime,attr"`
+	AvailabilityEndTime        DateTime             `xml:"availabilityEndTime,attr"`
+	PublishTime                DateTime             `xml:"publishTime,attr"`
+	MinimumUpdatePeriod        Duration             `xml:"minimumUpdatePeriod,attr"`
+	MinBufferTime              Duration             `xml:"minBufferTime,attr"`
+	TimeShiftBufferDepth       Duration             `xml:"timeShiftBufferDepth,attr"`
+	SuggestedPresentationDelay Duration             `xml:"suggestedPresentationDelay,attr"`
+	MediaPresentationDuration  Duration             `xml:"mediaPresentationDuration,attr"`
+	MaxSegmentDuration         Duration             `xml:"maxSegmentDuration,attr"`
+	BaseURLs                   []string             `xml:"BaseURL"`
+	Locations                  []string             `xml:"Location"`
+	UTCTimings                 []UTCTiming          `xml:"UTCTiming"`
+	ServiceDescriptions        []ServiceDescription `xml:"ServiceDescription"`
+	Periods                    []*Period            `xml:"Period"`
 
 	// base is the effective BaseURL for the document: the URL the manifest was
 	// fetched from, with any MPD-level BaseURL resolved against it.
@@ -56,6 +57,30 @@ type MPD struct {
 type UTCTiming struct {
 	SchemeIDURI string `xml:"schemeIdUri,attr"`
 	Value       string `xml:"value,attr"`
+}
+
+// ServiceDescription states the latency the operator is aiming for. It is how
+// a low-latency stream declares itself: without it there is nothing to say
+// whether a three-second edge delay is the design or a fault.
+type ServiceDescription struct {
+	ID       int       `xml:"id,attr"`
+	Latency  *Latency  `xml:"Latency"`
+	Playback *Playback `xml:"PlaybackRate"`
+}
+
+// Latency is the target and bounds, in milliseconds, of the delay between
+// capture and playback (DASH-IF low-latency guidelines).
+type Latency struct {
+	Target      int `xml:"target,attr"`
+	Min         int `xml:"min,attr"`
+	Max         int `xml:"max,attr"`
+	ReferenceID int `xml:"referenceId,attr"`
+}
+
+// Playback is the rate range a player may use to catch up to the live edge.
+type Playback struct {
+	Min float64 `xml:"min,attr"`
+	Max float64 `xml:"max,attr"`
 }
 
 // Period is one period of the presentation. A live stream with ad insertion
@@ -148,15 +173,19 @@ type Descriptor struct {
 // The pointer-typed attributes distinguish absent from zero, which matters
 // because a template inherits attribute by attribute from the level above it.
 type SegmentTemplate struct {
-	Media                  string           `xml:"media,attr"`
-	Initialization         string           `xml:"initialization,attr"`
-	Index                  string           `xml:"index,attr"`
-	Timescale              *uint64          `xml:"timescale,attr"`
-	Duration               *uint64          `xml:"duration,attr"`
-	StartNumber            *int64           `xml:"startNumber,attr"`
-	PresentationTimeOffset *uint64          `xml:"presentationTimeOffset,attr"`
-	AvailabilityTimeOffset float64          `xml:"availabilityTimeOffset,attr"`
-	Timeline               *SegmentTimeline `xml:"SegmentTimeline"`
+	Media                  string  `xml:"media,attr"`
+	Initialization         string  `xml:"initialization,attr"`
+	Index                  string  `xml:"index,attr"`
+	Timescale              *uint64 `xml:"timescale,attr"`
+	Duration               *uint64 `xml:"duration,attr"`
+	StartNumber            *int64  `xml:"startNumber,attr"`
+	PresentationTimeOffset *uint64 `xml:"presentationTimeOffset,attr"`
+	AvailabilityTimeOffset float64 `xml:"availabilityTimeOffset,attr"`
+	// AvailabilityTimeComplete false means a segment is fetchable before it
+	// has finished being produced -- the defining property of chunked
+	// low-latency delivery. Absent means true.
+	AvailabilityTimeComplete *bool            `xml:"availabilityTimeComplete,attr"`
+	Timeline                 *SegmentTimeline `xml:"SegmentTimeline"`
 }
 
 // SegmentTimeline lists segment durations explicitly, which is how any stream
@@ -256,6 +285,46 @@ func (m *MPD) Dynamic() bool { return strings.EqualFold(m.Type, "dynamic") }
 // BaseURL is the effective base URL of the document: the URL it was fetched
 // from with any MPD-level BaseURL resolved against it.
 func (m *MPD) BaseURL() string { return m.base }
+
+// Latency returns the declared latency target and whether one was declared.
+// DASH states it in milliseconds.
+func (m *MPD) Latency() (target time.Duration, ok bool) {
+	for _, sd := range m.ServiceDescriptions {
+		if sd.Latency != nil && sd.Latency.Target > 0 {
+			return time.Duration(sd.Latency.Target) * time.Millisecond, true
+		}
+	}
+	return 0, false
+}
+
+// MaxLatency returns the declared upper bound on latency, if there is one. It
+// is the operator's own statement of what counts as too far behind, which
+// beats any threshold this tool could invent.
+func (m *MPD) MaxLatency() (time.Duration, bool) {
+	for _, sd := range m.ServiceDescriptions {
+		if sd.Latency != nil && sd.Latency.Max > 0 {
+			return time.Duration(sd.Latency.Max) * time.Millisecond, true
+		}
+	}
+	return 0, false
+}
+
+// LowLatency reports whether the presentation is built for low latency.
+//
+// Two things say so independently: a declared latency target, and a template
+// that publishes segments before they are complete. Either is enough, because
+// packagers are inconsistent about which they emit.
+func (m *MPD) LowLatency() bool {
+	if _, ok := m.Latency(); ok {
+		return true
+	}
+	for _, r := range m.Representations() {
+		if t := r.SegmentTemplate; t != nil && t.chunked() {
+			return true
+		}
+	}
+	return false
+}
 
 // Representations flattens every representation in the presentation, in
 // document order.
@@ -544,6 +613,9 @@ func mergeTemplate(parent, child *SegmentTemplate) *SegmentTemplate {
 	}
 	if child.AvailabilityTimeOffset != 0 {
 		out.AvailabilityTimeOffset = child.AvailabilityTimeOffset
+	}
+	if child.AvailabilityTimeComplete != nil {
+		out.AvailabilityTimeComplete = child.AvailabilityTimeComplete
 	}
 	if child.Timeline != nil {
 		out.Timeline = child.Timeline

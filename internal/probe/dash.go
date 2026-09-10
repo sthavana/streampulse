@@ -77,12 +77,68 @@ func (p *Prober) probeRepresentation(ctx context.Context, t config.Target, r *da
 
 	if t.SegmentSample > 0 {
 		p.probeInit(ctx, t, variant, r.InitURI(), 0)
+		p.checkChunkedDelivery(ctx, t, r, variant, segs, now)
 		urls := make([]string, len(segs))
 		for i, s := range segs {
 			urls[i] = s.URI
 		}
 		p.sampleSegments(ctx, t, variant, urls)
 	}
+}
+
+// checkChunkedDelivery proves a low-latency stream is actually being
+// delivered chunk by chunk.
+//
+// This is the quietest way for low latency to fail. If the packager or a CDN
+// in front of it buffers each segment and only responds once it is complete,
+// nothing breaks: the manifest is right, every segment serves, players play.
+// They just play seconds behind where the design says they should, and the
+// entire low-latency build is inert. No other check can see it, because
+// nothing is wrong with any single response -- only with when it started.
+//
+// The signal is the response declaring its own length. A segment still being
+// produced cannot have a known length, so a Content-Length on one means the
+// origin waited for the whole thing before answering.
+func (p *Prober) checkChunkedDelivery(ctx context.Context, t config.Target,
+	r *dash.Representation, variant string, segs []dash.Segment, now time.Time) {
+
+	if !r.Period().MPD().LowLatency() {
+		return
+	}
+	// Only a segment still in production can answer the question. A finished
+	// one has a length legitimately, and asking about it would report every
+	// healthy stream as broken.
+	seg, ok := inProduction(segs, now)
+	if !ok {
+		return
+	}
+
+	length, status, err := p.probeStreaming(ctx, t, seg.URI)
+	if err != nil || status >= 400 {
+		// Availability is the segment sample's job; not this check's business.
+		return
+	}
+	labels := map[string]string{"target": t.Name, "variant": variant}
+	if length >= 0 {
+		p.reg.SetGauge("streampulse_chunked_delivery", helpChunked, 0, labels)
+		p.emit(t.Name, variant, alert.Warning, "chunked_delivery_missing",
+			"low-latency stream returned a complete segment ("+i64toa(length)+
+				" bytes, Content-Length set) for one still being produced: "+
+				"something between the packager and here is buffering whole segments")
+		return
+	}
+	p.reg.SetGauge("streampulse_chunked_delivery", helpChunked, 1, labels)
+}
+
+// inProduction returns the newest segment whose production has not finished
+// at now, which is the only one whose delivery can be judged.
+func inProduction(segs []dash.Segment, now time.Time) (dash.Segment, bool) {
+	for i := len(segs) - 1; i >= 0; i-- {
+		if s := segs[i]; !s.CompleteAt.IsZero() && s.CompleteAt.After(now) {
+			return s, true
+		}
+	}
+	return dash.Segment{}, false
 }
 
 // selectRepresentations picks which representations to probe.

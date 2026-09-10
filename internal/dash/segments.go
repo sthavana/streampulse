@@ -32,8 +32,15 @@ type Segment struct {
 	Duration time.Duration
 	// Available is the wall-clock time from which a player may fetch this
 	// segment. Zero for a static presentation, where everything listed is
-	// available already.
+	// available already. On a low-latency stream it is earlier than
+	// CompleteAt by @availabilityTimeOffset: the segment is fetchable while
+	// it is still being produced.
 	Available time.Time
+	// CompleteAt is the wall-clock time at which production of this segment
+	// finishes. It is the honest reference point for "how far behind the live
+	// edge are we": Available is shifted earlier by the offset and would
+	// flatter a low-latency stream by exactly that much.
+	CompleteAt time.Time
 }
 
 // End is the segment's presentation end, relative to the start of its period.
@@ -351,10 +358,10 @@ func (r *Representation) stamp(s *Segment) {
 		return
 	}
 	ato := time.Duration(r.SegmentTemplate.availabilityTimeOffset() * float64(time.Second))
-	s.Available = m.AvailabilityStartTime.Time.
+	s.CompleteAt = m.AvailabilityStartTime.Time.
 		Add(r.set.period.Start).
-		Add(s.End()).
-		Add(-ato)
+		Add(s.End())
+	s.Available = s.CompleteAt.Add(-ato)
 }
 
 // inWindow reports whether a segment has been published and has not yet aged
@@ -479,6 +486,16 @@ func (t *SegmentTemplate) presentationTimeOffset() uint64 {
 		return *t.PresentationTimeOffset
 	}
 	return 0
+}
+
+// chunked reports whether this template publishes segments before they are
+// complete, which is what chunked low-latency delivery means. The offset alone
+// does not say it: a packager may publish a whole segment slightly early.
+func (t *SegmentTemplate) chunked() bool {
+	if t == nil {
+		return false
+	}
+	return t.AvailabilityTimeComplete != nil && !*t.AvailabilityTimeComplete && t.AvailabilityTimeOffset > 0
 }
 
 func (t *SegmentTemplate) availabilityTimeOffset() float64 {
