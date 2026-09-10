@@ -130,6 +130,58 @@ is how most packagers write them.
 **`key_rotation_max_seconds`** flags a live stream whose keys have stopped
 rotating. It is opt-in because plenty of streams legitimately never rotate.
 
+## DASH (MPD parsing)
+
+The DASH manifest parser is implemented in `internal/dash`; the prober does not
+drive it yet, so nothing in the check table above runs against an MPD today.
+
+Parsing an MPD is a different job from parsing a playlist. Almost nothing a
+prober needs is stated outright: segment URLs live in templates, period start
+times are usually implied by the periods around them, `BaseURL` and
+`SegmentTemplate` are inherited down four levels, and on a live stream *which
+segments exist at all* is a function of wall-clock time. `dash.Parse` resolves
+all of it up front, so a caller gets representations that know their own base
+URL, their own effective template, and how to enumerate segments:
+
+```go
+m, err := dash.Parse(body, manifestURL)
+for _, r := range m.Representations() {
+    for _, seg := range r.SegmentsAt(time.Now()) {
+        // seg.URI is fully resolved and fetchable
+    }
+}
+```
+
+What is handled:
+
+| | |
+|---|---|
+| Addressing | `SegmentTemplate` with `$Number$` or `SegmentTimeline`, `SegmentList`, `SegmentBase` |
+| Identifiers | `$Number$`, `$Time$`, `$RepresentationID$`, `$Bandwidth$`, `$$`, and the `%0Nd` padding tag |
+| Timelines | `@t`/`@d`/`@r`/`@n`, including `@r="-1"` runs and mid-timeline gaps |
+| Multi-period | `@start` and `@duration` inferred from the neighbouring periods and `@mediaPresentationDuration` |
+| Inheritance | `BaseURL` chains and attribute-wise `SegmentTemplate` merging across MPD / Period / AdaptationSet / Representation |
+| Timing | `xs:duration` and `xs:dateTime`, `@presentationTimeOffset`, `@timescale`, `@availabilityTimeOffset` |
+| DRM | `ContentProtection`, `@default_KID`, and the `cenc:pssh` payload as raw bytes |
+
+`SegmentsAt(t)` returns the **availability window**, not every segment the
+manifest could describe: on a dynamic MPD that is the segments that have
+finished being produced (their end is at or before the live edge) and have not
+yet aged out of `@timeShiftBufferDepth`. That distinction is the whole point of
+computing it. Asking a CDN for a segment the packager has not published yet is
+a 404 that means nothing, and a prober that reported it would page someone for
+a healthy stream.
+
+Enumeration is arithmetic rather than iterative, and capped. A channel that has
+been live for a week is hundreds of thousands of segments deep, and only the
+last few minutes of it are fetchable.
+
+Where the spec leaves room, the parser takes the tolerant reading and leaves
+the judgement to the check layer: a malformed `@suggestedPresentationDelay`
+leaves that one attribute unset rather than costing the whole manifest, and a
+dynamic MPD with no `@availabilityStartTime` is read as fully available rather
+than as empty. Deciding that either is *wrong* is a check's job, not a parser's.
+
 ## Alerting: incidents, not findings
 
 A prober re-observes a fault on every poll. Sent straight to Slack, one frozen
@@ -268,8 +320,9 @@ and now redirects to an HTML page -- StreamPulse flags it as
          +--------------+
 ```
 
-Packages: `hls` (parser), `probe` (prober + checks), `metrics` (Prometheus
-exposition), `alert` (findings + notifiers), `config` (targets).
+Packages: `hls` and `dash` (manifest parsers), `probe` (prober + checks),
+`metrics` (Prometheus exposition), `alert` (findings + notifiers), `config`
+(targets).
 
 ## Deliberate design choices
 
@@ -285,7 +338,9 @@ exposition), `alert` (findings + notifiers), `config` (targets).
 
 ## Roadmap
 
-- **DASH** MPD parsing (`$Number$`/`$Time$` templates, multi-period, availability window)
+- **DASH probing**: drive the MPD parser from the prober -- segment availability,
+  live-edge freeze, multi-period continuity, and the DRM checks against
+  `ContentProtection`
 - **MPEG-TS / IPTV**: TR 101 290 P1/P2/P3-style checks (PCR jitter, CC errors, PAT/PMT integrity) via TSDuck
 - **Deep segment inspection**: decode a frame (ffprobe) for black/freeze, codec/res vs declared, PTS continuity
 - **Multi-vantage probing** (run from several regions; compare)
@@ -294,4 +349,6 @@ exposition), `alert` (findings + notifiers), `config` (targets).
 
 ## Status
 
-MVP. HLS path is implemented and tested (`make test`). Not yet production-hardened.
+MVP. The HLS path is implemented and tested end to end (`make test`). The DASH
+MPD parser is implemented and tested but not yet wired into the prober. Not yet
+production-hardened.
