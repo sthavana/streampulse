@@ -115,9 +115,9 @@ type AdaptationSet struct {
 }
 
 // Representation is one encoding of an adaptation set -- one rung of the
-// ladder. After Parse its BaseURL, SegmentTemplate, SegmentList and
-// SegmentBase are the *effective* ones, with everything inherited from the
-// adaptation set, period and MPD already folded in.
+// ladder. After Parse its BaseURL, SegmentTemplate, SegmentList, SegmentBase
+// and ContentProtections are the *effective* ones, with everything inherited
+// from the adaptation set, period and MPD already folded in.
 type Representation struct {
 	ID                 string              `xml:"id,attr"`
 	Bandwidth          int                 `xml:"bandwidth,attr"`
@@ -498,6 +498,14 @@ func (r *Representation) inherit() {
 		} else {
 			r.SegmentBase = p.SegmentBase
 		}
+	}
+	// ContentProtection is declared at the adaptation set level by almost
+	// every packager, and applies to the representations under it. A
+	// representation that declares its own replaces the set's rather than
+	// adding to it, which is the reading that keeps "this representation is
+	// unprotected" meaning exactly that.
+	if len(r.ContentProtections) == 0 {
+		r.ContentProtections = a.ContentProtections
 	}
 }
 

@@ -2,23 +2,26 @@ package probe
 
 import (
 	"context"
+	"encoding/base64"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	"streampulse/internal/config"
 	"streampulse/internal/dash"
+	"streampulse/internal/hls"
 )
 
 var dashAST = time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 
 // timelineMPD is a live, timeline-addressed manifest of n 4s segments whose
-// first segment starts at firstTick. Advancing firstTick is what a healthy
-// packager does between polls.
-func timelineMPD(firstTick, n int) string {
+// last segment *ends* at edgeTick seconds after availabilityStartTime.
+// Advancing edgeTick in step with the clock is what a healthy packager does.
+func timelineMPD(edgeTick, n int) string {
 	return fmt.Sprintf(`<MPD xmlns="urn:mpeg:dash:schema:mpd:2011" type="dynamic"
 	   availabilityStartTime="2026-01-01T00:00:00Z" minimumUpdatePeriod="PT4S">
 	  <Period id="p0" start="PT0S"><AdaptationSet contentType="video" mimeType="video/mp4">
@@ -26,8 +29,12 @@ func timelineMPD(firstTick, n int) string {
 	      <SegmentTimeline><S t="%d" d="4" r="%d"/></SegmentTimeline>
 	    </SegmentTemplate>
 	    <Representation id="v0" bandwidth="1"/>
-	  </AdaptationSet></Period></MPD>`, firstTick, n-1)
+	  </AdaptationSet></Period></MPD>`, edgeTick-4*n, n-1)
 }
+
+// liveEdgeTick is the tick a healthy packager's edge sits at when the prober's
+// clock reads t: the fixtures run one hour after availabilityStartTime.
+func liveEdgeTick(elapsed time.Duration) int { return int((time.Hour + elapsed).Seconds()) }
 
 // mutableOrigin serves whatever MPD body it currently holds.
 type mutableOrigin struct {
@@ -64,7 +71,7 @@ func (o *mutableOrigin) close()      { o.srv.Close() }
 // poll. That is the single most expensive live failure and the reason this
 // check exists.
 func TestDASHStalledTimeline(t *testing.T) {
-	origin := newMutableOrigin(timelineMPD(0, 10))
+	origin := newMutableOrigin(timelineMPD(liveEdgeTick(0), 10))
 	defer origin.close()
 
 	pr, clk := newTestProber(dashAST.Add(time.Hour))
@@ -89,7 +96,7 @@ func TestDASHStalledTimeline(t *testing.T) {
 
 // The mirror image: a packager that keeps publishing must never be reported.
 func TestDASHAdvancingTimelineIsSilent(t *testing.T) {
-	origin := newMutableOrigin(timelineMPD(0, 10))
+	origin := newMutableOrigin(timelineMPD(liveEdgeTick(0), 10))
 	defer origin.close()
 
 	pr, clk := newTestProber(dashAST.Add(time.Hour))
@@ -97,10 +104,11 @@ func TestDASHAdvancingTimelineIsSilent(t *testing.T) {
 	pr.notifier = cap
 	target := config.Target{Name: "live", URL: origin.url()}
 
-	for i := 0; i < 10; i++ {
+	for i := 1; i <= 10; i++ {
 		pr.ProbeTarget(context.Background(), target)
 		clk.advance(8 * time.Second)
-		origin.set(timelineMPD(4*(i+1), 10)) // the window slides
+		// The window slides in step with the clock, as a healthy packager's does.
+		origin.set(timelineMPD(liveEdgeTick(time.Duration(i)*8*time.Second), 10))
 	}
 	if len(cap.findings) != 0 {
 		t.Fatalf("a healthy live stream produced findings: %+v", cap.findings)
@@ -108,7 +116,7 @@ func TestDASHAdvancingTimelineIsSilent(t *testing.T) {
 }
 
 func TestDASHTimelineRollback(t *testing.T) {
-	origin := newMutableOrigin(timelineMPD(40, 10))
+	origin := newMutableOrigin(timelineMPD(liveEdgeTick(0), 10))
 	defer origin.close()
 
 	pr, clk := newTestProber(dashAST.Add(time.Hour))
@@ -118,7 +126,7 @@ func TestDASHTimelineRollback(t *testing.T) {
 
 	pr.ProbeTarget(context.Background(), target)
 	clk.advance(4 * time.Second)
-	origin.set(timelineMPD(20, 10)) // origin failover to a stale packager
+	origin.set(timelineMPD(liveEdgeTick(0)-20, 10)) // failover to a stale packager
 	pr.ProbeTarget(context.Background(), target)
 
 	if !cap.has("playlist_rollback") {
@@ -237,7 +245,7 @@ func TestNumberAddressedLiveDoesNotFakeAFreezeCheck(t *testing.T) {
 }
 
 func TestDASHShortWindow(t *testing.T) {
-	origin := newMutableOrigin(timelineMPD(0, 3)) // 12s of window
+	origin := newMutableOrigin(timelineMPD(liveEdgeTick(0), 3)) // 12s of window
 	defer origin.close()
 
 	pr, _ := newTestProber(dashAST.Add(time.Hour))
@@ -269,9 +277,9 @@ func TestUnexpectedStatic(t *testing.T) {
 // Two targets pointing at different manifests must not share edge state, or a
 // freeze on one would be masked by the other advancing.
 func TestEdgeStateIsPerTargetAndRepresentation(t *testing.T) {
-	frozen := newMutableOrigin(timelineMPD(0, 5))
+	frozen := newMutableOrigin(timelineMPD(liveEdgeTick(0), 5))
 	defer frozen.close()
-	moving := newMutableOrigin(timelineMPD(0, 5))
+	moving := newMutableOrigin(timelineMPD(liveEdgeTick(0), 5))
 	defer moving.close()
 
 	pr, clk := newTestProber(dashAST.Add(time.Hour))
@@ -280,11 +288,11 @@ func TestEdgeStateIsPerTargetAndRepresentation(t *testing.T) {
 	a := config.Target{Name: "frozen", URL: frozen.url()}
 	b := config.Target{Name: "moving", URL: moving.url()}
 
-	for i := 0; i < 4; i++ {
+	for i := 1; i <= 4; i++ {
 		pr.ProbeTarget(context.Background(), a)
 		pr.ProbeTarget(context.Background(), b)
 		clk.advance(20 * time.Second)
-		moving.set(timelineMPD(4*(i+1), 5))
+		moving.set(timelineMPD(liveEdgeTick(time.Duration(i)*20*time.Second), 5))
 	}
 	for _, f := range cap.findings {
 		if f.Target == "moving" {
@@ -379,7 +387,7 @@ func TestLongMinimumUpdatePeriodRaisesTheStallThreshold(t *testing.T) {
 	   availabilityStartTime="2026-01-01T00:00:00Z" minimumUpdatePeriod="PT30S">
 	  <Period start="PT0S"><AdaptationSet contentType="video" mimeType="video/mp4">
 	    <SegmentTemplate media="v/$Time$.m4s" timescale="1">
-	      <SegmentTimeline><S t="0" d="4" r="9"/></SegmentTimeline>
+	      <SegmentTimeline><S t="3560" d="4" r="9"/></SegmentTimeline>
 	    </SegmentTemplate><Representation id="v0" bandwidth="1"/>
 	  </AdaptationSet></Period></MPD>`
 
@@ -404,5 +412,202 @@ func TestLongMinimumUpdatePeriodRaisesTheStallThreshold(t *testing.T) {
 	pr.ProbeTarget(context.Background(), target)
 	if !cap.has("playlist_stalled") {
 		t.Errorf("a genuinely frozen slow-update stream went undetected: %+v", cap.findings)
+	}
+}
+
+// An encoder that is falling behind but still publishing is a different fault
+// from a frozen one: the timeline advances every poll, so the freeze check is
+// correctly silent, and only the comparison against wall clock catches it.
+func TestDASHEdgeStaleWhileStillAdvancing(t *testing.T) {
+	origin := newMutableOrigin(timelineMPD(liveEdgeTick(0), 10))
+	defer origin.close()
+
+	pr, clk := newTestProber(dashAST.Add(time.Hour))
+	cap := &capture{}
+	pr.notifier = cap
+	target := config.Target{Name: "lagging", URL: origin.url()}
+	polls := 1
+
+	// Publishing 4s of media for every 8s of wall clock: always moving, never
+	// catching up. The lag grows by 4s per poll.
+	poll := func(n int) {
+		for i := 0; i < n; i++ {
+			pr.ProbeTarget(context.Background(), target)
+			clk.advance(8 * time.Second)
+			origin.set(timelineMPD(liveEdgeTick(time.Duration(polls)*4*time.Second), 10))
+			polls++
+		}
+	}
+
+	// A few seconds behind is what every healthy packager looks like.
+	poll(4)
+	if cap.has("edge_stale") {
+		t.Fatalf("fired at ~16s of lag, which is normal publishing delay: %+v", cap.findings)
+	}
+
+	poll(12)
+	if !cap.has("edge_stale") {
+		t.Fatalf("a packager falling behind wall clock went undetected: %+v", cap.findings)
+	}
+	if cap.has("playlist_stalled") {
+		t.Error("the timeline was advancing every poll; this is not a freeze")
+	}
+}
+
+// The DRM half. An MPD carries no key URI, so what is checkable is what it
+// asserts: that the content is protected, and that its init data is well formed.
+func TestDASHDRMChecks(t *testing.T) {
+	mpdWith := func(protection string) string {
+		return `<MPD xmlns="urn:mpeg:dash:schema:mpd:2011" xmlns:cenc="urn:mpeg:cenc:2013"
+		   type="static" mediaPresentationDuration="PT8S">
+		  <Period><AdaptationSet contentType="video" mimeType="video/mp4">` + protection + `
+		    <SegmentTemplate media="v/$Number$.m4s" timescale="1" duration="4"/>
+		    <Representation id="v0" bandwidth="1"/>
+		  </AdaptationSet></Period></MPD>`
+	}
+
+	cases := []struct {
+		name       string
+		protection string
+		expect     bool
+		want       string
+	}{
+		{"clear stream declared encrypted", ``, true, "unexpected_clear_segments"},
+		{"protected stream", `<ContentProtection schemeIdUri="urn:uuid:EDEF8BA9-79D6-4ACE-A3C8-27DCD51D21ED"/>`, true, ""},
+		{"bad default_KID", `<ContentProtection schemeIdUri="urn:mpeg:dash:mp4protection:2011" value="cenc" cenc:default_KID="$KID$"/>`, false, "kid_invalid"},
+		{"undashed default_KID is accepted", `<ContentProtection schemeIdUri="urn:mpeg:dash:mp4protection:2011" cenc:default_KID="21ec20203aea4069a2dd08002b30309d"/>`, false, ""},
+		{"pssh not base64", `<ContentProtection schemeIdUri="urn:uuid:EDEF8BA9-79D6-4ACE-A3C8-27DCD51D21ED"><cenc:pssh>not!base64!</cenc:pssh></ContentProtection>`, false, "pssh_malformed"},
+		{"pssh truncated", `<ContentProtection schemeIdUri="urn:uuid:EDEF8BA9-79D6-4ACE-A3C8-27DCD51D21ED"><cenc:pssh>AAAAKXBzc2gAAAAA</cenc:pssh></ContentProtection>`, false, "pssh_malformed"},
+		// A bare PlayReady Object is not a PSSH box and must not be flagged.
+		{"playready object", `<ContentProtection schemeIdUri="urn:uuid:9A04F079-9840-4286-AB92-E65BE0885F95"><cenc:pssh>PFdSTUhFQURFUj48REFUQS8+PC9XUk1IRUFERVI+</cenc:pssh></ContentProtection>`, false, ""},
+	}
+
+	for _, c := range cases {
+		origin := newMutableOrigin(mpdWith(c.protection))
+		pr, _ := newTestProber(dashAST)
+		cap := &capture{}
+		pr.notifier = cap
+		pr.ProbeTarget(context.Background(), config.Target{
+			Name: "vod", URL: origin.url(), ExpectEncrypted: c.expect,
+		})
+		origin.close()
+
+		switch {
+		case c.want == "" && len(cap.findings) > 0:
+			t.Errorf("%s: expected silence, got %+v", c.name, cap.findings)
+		case c.want != "" && !cap.has(c.want):
+			t.Errorf("%s: expected %s, got %+v", c.name, c.want, cap.findings)
+		}
+	}
+}
+
+// A valid PSSH box must be silent, and its DRM system named the same way the
+// HLS path names it.
+func TestValidPSSHIsSilentAndNamed(t *testing.T) {
+	box := psshBox(hls.SystemWidevine, []byte("init-data"))
+	raw := `<MPD xmlns="urn:mpeg:dash:schema:mpd:2011" xmlns:cenc="urn:mpeg:cenc:2013"
+	   type="static" mediaPresentationDuration="PT4S">
+	  <Period><AdaptationSet contentType="video" mimeType="video/mp4">
+	    <ContentProtection schemeIdUri="urn:uuid:EDEF8BA9-79D6-4ACE-A3C8-27DCD51D21ED">
+	      <cenc:pssh>` + base64.StdEncoding.EncodeToString(box) + `</cenc:pssh>
+	    </ContentProtection>
+	    <SegmentTemplate media="v/$Number$.m4s" timescale="1" duration="4"/>
+	    <Representation id="v0" bandwidth="1"/>
+	  </AdaptationSet></Period></MPD>`
+
+	origin := newMutableOrigin(raw)
+	defer origin.close()
+	pr, _ := newTestProber(dashAST)
+	cap := &capture{}
+	pr.notifier = cap
+	pr.ProbeTarget(context.Background(), config.Target{Name: "vod", URL: origin.url(), ExpectEncrypted: true})
+
+	if len(cap.findings) != 0 {
+		t.Fatalf("a valid Widevine PSSH produced %+v", cap.findings)
+	}
+	empty := psshBox(hls.SystemWidevine, nil)
+	origin.set(strings.Replace(raw, base64.StdEncoding.EncodeToString(box), base64.StdEncoding.EncodeToString(empty), 1))
+	pr.ProbeTarget(context.Background(), config.Target{Name: "vod", URL: origin.url(), ExpectEncrypted: true})
+	if !cap.has("pssh_empty") {
+		t.Errorf("a PSSH carrying nothing produced %+v", cap.findings)
+	}
+}
+
+// Multiple periods are DASH's splice points, reported the same way HLS
+// discontinuities are.
+func TestPeriodBoundariesAreReported(t *testing.T) {
+	raw := `<MPD xmlns="urn:mpeg:dash:schema:mpd:2011" type="static" mediaPresentationDuration="PT16S">
+	  <Period id="a" duration="PT8S"><AdaptationSet contentType="video" mimeType="video/mp4">
+	    <SegmentTemplate media="a/$Number$.m4s" timescale="1" duration="4"/>
+	    <Representation id="v0" bandwidth="1"/></AdaptationSet></Period>
+	  <Period id="b" duration="PT8S"><AdaptationSet contentType="video" mimeType="video/mp4">
+	    <SegmentTemplate media="b/$Number$.m4s" timescale="1" duration="4"/>
+	    <Representation id="v0" bandwidth="1"/></AdaptationSet></Period></MPD>`
+
+	origin := newMutableOrigin(raw)
+	defer origin.close()
+	pr, _ := newTestProber(dashAST)
+	cap := &capture{}
+	pr.notifier = cap
+	pr.ProbeTarget(context.Background(), config.Target{Name: "vod", URL: origin.url()})
+
+	if !cap.has("discontinuity_present") {
+		t.Errorf("a two-period presentation produced %+v", cap.findings)
+	}
+}
+
+// A missing init segment stops playback dead while every other check passes:
+// the manifest parses and every media segment is served.
+func TestInitSegmentUnavailable(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.URL.Path == "/manifest.mpd":
+			_, _ = w.Write([]byte(staticMPD))
+		case strings.HasSuffix(r.URL.Path, "/init.mp4"):
+			http.NotFound(w, r)
+		default:
+			_, _ = w.Write([]byte("\x00\x00"))
+		}
+	}))
+	defer srv.Close()
+
+	pr, _ := newTestProber(dashAST)
+	cap := &capture{}
+	pr.notifier = cap
+	pr.ProbeTarget(context.Background(), config.Target{
+		Name: "vod", URL: srv.URL + "/manifest.mpd", SegmentSample: 1,
+	})
+
+	if !cap.has("init_segment_availability") {
+		t.Fatalf("a dead init segment went undetected: %+v", cap.findings)
+	}
+	if cap.has("segment_availability") {
+		t.Error("media segments were fine; only the init segment was not")
+	}
+}
+
+// The floor matters more than the scaling term, and only bites on short
+// segments -- which is where the real false positive came from: Unified
+// Streaming's 1.92s segments run about 6s behind wall clock in perfect health,
+// and a threshold derived from segment duration alone reported it every poll.
+func TestStalenessThreshold(t *testing.T) {
+	dur := func(d time.Duration) dash.Duration { return dash.Duration{Value: d, Set: true} }
+
+	cases := []struct {
+		name    string
+		segment time.Duration
+		spd     dash.Duration
+		want    time.Duration
+	}{
+		{"short segments use the floor", 1920 * time.Millisecond, dash.Duration{}, 30 * time.Second},
+		{"long segments scale past it", 10 * time.Second, dash.Duration{}, 40 * time.Second},
+		{"a declared presentation delay is believed", 2 * time.Second, dur(60 * time.Second), 68 * time.Second},
+		{"a small declared delay does not lower the floor", 2 * time.Second, dur(time.Second), 30 * time.Second},
+	}
+	for _, c := range cases {
+		m := &dash.MPD{SuggestedPresentationDelay: c.spd}
+		if got := stalenessThreshold(c.segment, m); got != c.want {
+			t.Errorf("%s: threshold = %v, want %v", c.name, got, c.want)
+		}
 	}
 }

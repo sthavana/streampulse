@@ -332,3 +332,29 @@ func TestParseIsNamespaceAndTagTolerant(t *testing.T) {
 		t.Error("type=static should not be dynamic")
 	}
 }
+
+// ContentProtection is declared on the adaptation set by almost every
+// packager. A consumer asking "is this representation encrypted" must not have
+// to walk back up the tree to find out.
+func TestContentProtectionIsInherited(t *testing.T) {
+	raw := `<MPD xmlns:cenc="urn:mpeg:cenc:2013"><Period><AdaptationSet mimeType="video/mp4">
+	  <ContentProtection schemeIdUri="urn:uuid:EDEF8BA9-79D6-4ACE-A3C8-27DCD51D21ED"/>
+	  <SegmentTemplate media="$Number$.m4s" duration="4"/>
+	  <Representation id="inherits" bandwidth="1"/>
+	  <Representation id="declares" bandwidth="1">
+	    <ContentProtection schemeIdUri="urn:uuid:9A04F079-9840-4286-AB92-E65BE0885F95"/>
+	  </Representation>
+	 </AdaptationSet></Period></MPD>`
+	m, err := Parse([]byte(raw), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	reps := m.Representations()
+	if len(reps[0].ContentProtections) != 1 || reps[0].ContentProtections[0].SystemID() != "edef8ba9-79d6-4ace-a3c8-27dcd51d21ed" {
+		t.Errorf("inherited protection wrong: %+v", reps[0].ContentProtections)
+	}
+	// Its own declaration replaces the set's, so "unprotected" stays meaningful.
+	if len(reps[1].ContentProtections) != 1 || reps[1].ContentProtections[0].SystemID() != "9a04f079-9840-4286-ab92-e65be0885f95" {
+		t.Errorf("own protection should replace the set's: %+v", reps[1].ContentProtections)
+	}
+}

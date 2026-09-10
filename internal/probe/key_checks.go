@@ -24,7 +24,7 @@ func (p *Prober) keyChecks(ctx context.Context, t config.Target, plURL, variant 
 	labels := map[string]string{"target": t.Name, "variant": variant}
 
 	distinct := pl.DistinctKeys()
-	p.reg.SetGauge("streampulse_key_count", "Distinct encrypting keys referenced by the playlist",
+	p.reg.SetGauge("streampulse_key_count", helpKeyCount,
 		float64(len(distinct)), labels)
 
 	// --- content expected to be encrypted but is not ---

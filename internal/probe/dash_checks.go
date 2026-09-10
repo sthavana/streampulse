@@ -15,6 +15,14 @@ func dashManifestChecks(now time.Time, t config.Target, m *dash.MPD) []alert.Fin
 		out = append(out, finding(now, t, "", alert.Critical, "unexpected_static",
 			`expected a live stream but the MPD declares type="static"`))
 	}
+
+	// Period boundaries are DASH's splice points -- the same ad-break
+	// awareness EXT-X-DISCONTINUITY gives on the HLS side, so it reuses that
+	// check name rather than inventing a parallel vocabulary for one concept.
+	if n := len(m.Periods); n > 1 {
+		out = append(out, finding(now, t, "", alert.Info, "discontinuity_present",
+			itoa(n)+" periods in the presentation (each boundary is a splice point)"))
+	}
 	return out
 }
 
@@ -62,9 +70,20 @@ func (p *Prober) dashEdgeChecks(now time.Time, t config.Target, key, variant str
 
 	var out []alert.Finding
 	last := segs[len(segs)-1]
+	threshold := stallThreshold(last.Duration, r.Period().MPD().MinimumUpdatePeriod)
 
 	p.mu.Lock()
 	defer p.mu.Unlock()
+
+	// How far behind wall clock the packager's own edge is. Distinct from a
+	// freeze: an encoder that is falling behind but still publishing produces
+	// a timeline that advances, just never fast enough to catch up.
+	if !last.Available.IsZero() {
+		if behind := now.Sub(last.Available); behind > stalenessThreshold(last.Duration, r.Period().MPD()) {
+			out = append(out, finding(now, t, variant, alert.Warning, "edge_stale",
+				"live edge is "+ftoa(behind.Seconds())+"s behind wall-clock"))
+		}
+	}
 
 	st := p.edges[key]
 	if st == nil {
@@ -90,7 +109,7 @@ func (p *Prober) dashEdgeChecks(now time.Time, t config.Target, key, variant str
 		// polling faster than the segment duration legitimately sees the same
 		// manifest on consecutive polls.
 		stalled := now.Sub(st.lastChange)
-		if stalled > stallThreshold(last.Duration, r.Period().MPD().MinimumUpdatePeriod) {
+		if stalled > threshold {
 			out = append(out, finding(now, t, variant, alert.Critical, "playlist_stalled",
 				"timeline has not advanced for "+ftoa(stalled.Seconds())+"s (live edge frozen)"))
 		}
@@ -135,6 +154,36 @@ func stallThreshold(segment time.Duration, mup dash.Duration) time.Duration {
 	}
 	if m := 3 * mup.Or(0); m > d {
 		d = m
+	}
+	return d
+}
+
+// stalenessThreshold is how far the live edge may sit behind wall clock before
+// it is worth reporting, and it is deliberately coarse.
+//
+// Two things that are not faults live in this number. A packager cannot
+// publish a segment before it has finished producing it, and then it has to
+// reach the CDN, so a healthy live edge sits a few segments behind by
+// construction -- Unified Streaming's demo channel runs about 6s behind with
+// 1.92s segments. And the measurement is against *our* clock, so any NTP skew
+// on this host lands here too. A tight threshold would report both as faults
+// on every poll.
+//
+// What it is for is an encoder falling progressively behind, which is
+// invisible to every other check: the timeline keeps advancing, so nothing is
+// frozen, and the segments all exist. That fault grows to tens of seconds and
+// then minutes, so a 30s floor loses nothing worth having.
+func stalenessThreshold(segment time.Duration, m *dash.MPD) time.Duration {
+	d := 30 * time.Second
+	if s := 4 * segment; s > d {
+		d = s
+	}
+	// A stream that tells players to sit well back from the edge is telling us
+	// it runs with latency; take it at its word rather than paging about it.
+	if spd := m.SuggestedPresentationDelay.Or(0); spd > 0 {
+		if v := spd + 4*segment; v > d {
+			d = v
+		}
 	}
 	return d
 }

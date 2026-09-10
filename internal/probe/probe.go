@@ -31,6 +31,8 @@ const (
 	helpSegmentCount  = "Segments in the current window"
 	helpSegmentUp     = "1 if a sampled segment is fetchable"
 	helpSegmentTTFB   = "Time-to-first-byte for a sampled segment"
+	helpKeyCount      = "Distinct encrypting keys (HLS) or DRM systems (DASH) in force"
+	helpInitUp        = "1 if the initialisation segment is fetchable"
 )
 
 type Prober struct {

@@ -148,8 +148,33 @@ windows and metrics as the HLS path.
 | `playlist_rollback` | critical | Timeline went backwards (stale origin / failover) |
 | `short_window` | warning | Live/DVR window shorter than expected |
 | `unexpected_static` | critical | `type="static"` on a stream you declared live |
+| `edge_stale` | warning | Live edge falling behind wall-clock (encoder losing ground) |
+| `init_segment_availability` | critical | Initialisation segment 404s -- playback cannot start at all |
+| `unexpected_clear_segments` | critical | No `ContentProtection` on a stream declared encrypted |
+| `pssh_malformed` / `pssh_empty` | warning | `cenc:pssh` fails to parse or carries nothing |
+| `kid_invalid` | warning | `default_KID` is not a key id |
+| `discontinuity_present` | info | More than one period (each boundary is a splice point) |
 
-The DRM rules (`expect_encrypted` and the key family) are still HLS-only.
+`edge_stale` is the DASH counterpart of HLS's `pdt_stale`. The names differ
+because `pdt_stale` names a tag DASH does not have; they could be unified under
+one name later, but renaming a check breaks existing alert rules, so it is left
+as a deliberate decision rather than done quietly.
+
+### DRM
+
+`expect_encrypted` works, but the key family does not port. An `EXT-X-KEY`
+carries a URI a player fetches, so StreamPulse can prove the key is
+retrievable; an MPD carries no such thing. Licence acquisition is a
+DRM-system protocol with a signed challenge, which no synthetic prober can
+stand in for. What is checkable is what the manifest asserts: that the content
+is protected at all, and that the initialisation data it ships is well formed.
+`ContentProtection` declared on an adaptation set is inherited by its
+representations, so "this representation is unprotected" means exactly that.
+
+The init segment gets a request of its own because its failure mode is
+invisible to every other check: the manifest parses, every media segment is
+served, and playback still cannot start, because a player fetches the init
+segment first and has nothing to initialise the decoder with.
 
 ### Where the freeze check applies, and why it does not always
 
@@ -171,6 +196,15 @@ The segment sample asks the CDN for the segment at the computed edge on every
 poll, and a packager that has stopped publishing fails that fetch:
 `segment_availability` **is** the freeze check for number-addressed DASH. This
 is why `segment_sample` matters more on a DASH target than on an HLS one.
+
+`edge_stale` is deliberately coarse -- a 30s floor. Two things that are not
+faults live in that number: a packager cannot publish a segment before it has
+finished producing it, so a healthy edge sits a few segments back by
+construction (Unified Streaming's demo channel runs ~6s behind with 1.92s
+segments), and the comparison is against *our* clock, so NTP skew on the probe
+host lands here too. What it is for is an encoder falling progressively behind,
+which nothing else sees -- the timeline still advances and the segments all
+exist -- and that fault grows to minutes, so a coarse threshold loses nothing.
 
 The tolerance before an unchanged edge counts as frozen is three segments,
 floored at 6s and raised by `@minimumUpdatePeriod`: a manifest that says it
@@ -346,6 +380,7 @@ matches is worse than one that refuses to load.
 `streampulse_period_count`, `streampulse_representation_count`,
 `streampulse_findings_total`,
 `streampulse_key_count`, `streampulse_key_available`,
+`streampulse_init_segment_available`,
 `streampulse_key_fetch_seconds`,
 `streampulse_incident_active`, `streampulse_incidents_opened_total`,
 `streampulse_incidents_resolved_total`, `streampulse_maintenance_active`,
@@ -413,9 +448,10 @@ Packages: `hls` and `dash` (manifest parsers), `probe` (prober + checks),
 
 ## Roadmap
 
-- **DASH: the remaining checks** -- DRM against `ContentProtection`, live-edge
-  staleness against wall clock, period-boundary awareness (the DASH analogue of
-  `discontinuity_present`), and init-segment reachability
+- **HLS: `EXT-X-MAP`** -- the init segment is checked on the DASH path but not
+  yet on the HLS one, where the parser does not read the tag
+- **Low-latency DASH** -- chunked `availabilityTimeOffset` streams are parsed
+  but their sub-segment timing is not checked
 - **MPEG-TS / IPTV**: TR 101 290 P1/P2/P3-style checks (PCR jitter, CC errors, PAT/PMT integrity) via TSDuck
 - **Deep segment inspection**: decode a frame (ffprobe) for black/freeze, codec/res vs declared, PTS continuity
 - **Multi-vantage probing** (run from several regions; compare)
@@ -425,5 +461,5 @@ Packages: `hls` and `dash` (manifest parsers), `probe` (prober + checks),
 ## Status
 
 MVP. The HLS path is implemented and tested end to end (`make test`). DASH is
-probed for reachability, segment availability and live-edge progression; its
-DRM checks are not written yet. Not yet production-hardened.
+probed for reachability, segment availability, live-edge progression and the
+DRM its manifest declares. Not yet production-hardened.

@@ -71,14 +71,46 @@ func (p *Prober) probeRepresentation(ctx context.Context, t config.Target, r *da
 	for _, f := range p.dashRepChecks(now, t, edgeKey(t, variant), variant, r, segs) {
 		p.record(f)
 	}
+	for _, f := range p.dashDRMChecks(now, t, r, variant) {
+		p.record(f)
+	}
 
 	if t.SegmentSample > 0 {
+		p.checkInitSegment(ctx, t, r, variant)
 		urls := make([]string, len(segs))
 		for i, s := range segs {
 			urls[i] = s.URI
 		}
 		p.sampleSegments(ctx, t, variant, urls)
 	}
+}
+
+// checkInitSegment proves the initialisation segment is fetchable.
+//
+// It is worth a request of its own because its failure mode is invisible to
+// every other check: the manifest parses, every media segment is served, and
+// playback still cannot start, because a player fetches the init segment first
+// and has nothing to initialise the decoder with. It is also the one fetch
+// where a 404 is unambiguous -- unlike a media segment at the live edge, an
+// init segment is static and should never not be there.
+func (p *Prober) checkInitSegment(ctx context.Context, t config.Target, r *dash.Representation, variant string) {
+	init := r.InitURI()
+	if init == "" {
+		return
+	}
+	labels := map[string]string{"target": t.Name, "variant": variant}
+	_, status, err := p.probeSegment(ctx, init)
+	if err != nil || status >= 400 {
+		detail := "HTTP " + itoa(status)
+		if err != nil {
+			detail = err.Error()
+		}
+		p.reg.SetGauge("streampulse_init_segment_available", helpInitUp, 0, labels)
+		p.emit(t.Name, variant, alert.Critical, "init_segment_availability",
+			"initialisation segment not available ("+detail+"): "+init)
+		return
+	}
+	p.reg.SetGauge("streampulse_init_segment_available", helpInitUp, 1, labels)
 }
 
 // selectRepresentations picks which representations to probe.
