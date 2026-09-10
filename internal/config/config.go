@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"strings"
 	"time"
 
 	"streampulse/internal/alert"
@@ -14,15 +15,28 @@ import (
 
 // Target is one stream to monitor.
 type Target struct {
-	Name            string   `json:"name"`
-	URL             string   `json:"url"`
+	Name string `json:"name"`
+	URL  string `json:"url"`
+	// Type selects the manifest parser: "hls", "dash", or empty to detect it
+	// from the response body. Detection is reliable enough to be the default,
+	// but naming the type turns "this is not a manifest" into a parse error
+	// that says what was actually wrong.
+	Type            string   `json:"type,omitempty"`
 	IntervalSeconds int      `json:"interval_seconds"`
-	MaxVariants     int      `json:"max_variants"`       // 0 = probe all variants
-	MaxRenditions   int      `json:"max_renditions"`     // 0 = probe all EXT-X-MEDIA renditions that have a URI
-	RenditionTypes  []string `json:"rendition_types"`    // e.g. ["AUDIO"]; empty = every type
-	SegmentSample   int      `json:"segment_sample"`     // segments per variant to fetch-check (0 = none)
-	ExpectLive      bool     `json:"expect_live"`        // flag if an ENDLIST appears
-	MinWindowSec    float64  `json:"min_window_seconds"` // warn if live window shorter than this (0 = skip)
+	MaxVariants     int      `json:"max_variants"`    // 0 = probe all variants
+	MaxRenditions   int      `json:"max_renditions"`  // 0 = probe all EXT-X-MEDIA renditions that have a URI
+	RenditionTypes  []string `json:"rendition_types"` // e.g. ["AUDIO"]; empty = every type
+	SegmentSample   int      `json:"segment_sample"`  // segments per variant to fetch-check (0 = none)
+
+	// DASH. MaxRepresentations is per adaptation set rather than per
+	// manifest: a flat cap on a ladder that lists video before audio would
+	// silently stop probing audio altogether, which is the break this tool
+	// exists to catch. 1 probes the top rung of every track.
+	MaxRepresentations  int      `json:"max_representations,omitempty"`  // 0 = probe every representation
+	RepresentationTypes []string `json:"representation_types,omitempty"` // e.g. ["video","audio"]; empty = every type
+
+	ExpectLive   bool    `json:"expect_live"`        // flag if an ENDLIST appears
+	MinWindowSec float64 `json:"min_window_seconds"` // warn if live window shorter than this (0 = skip)
 
 	// DRM / EXT-X-KEY.
 	ExpectEncrypted   bool `json:"expect_encrypted"`         // flag any segment served in the clear
@@ -192,6 +206,13 @@ func Load(path string) (*Config, error) {
 	}
 	if len(c.Targets) == 0 {
 		return nil, fmt.Errorf("config has no targets")
+	}
+	for _, t := range c.Targets {
+		switch strings.ToLower(t.Type) {
+		case "", "hls", "dash":
+		default:
+			return nil, fmt.Errorf("target %q: unknown type %q, want \"hls\", \"dash\", or empty to auto-detect", t.Name, t.Type)
+		}
 	}
 	// Validate maintenance windows at load time so a typo fails at startup
 	// rather than during the maintenance it was meant to cover.

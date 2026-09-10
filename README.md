@@ -1,6 +1,6 @@
 # StreamPulse
 
-Proactive, synthetic health monitoring for OTT / IPTV streaming — starting with HLS.
+Proactive, synthetic health monitoring for OTT / IPTV streaming — HLS and DASH.
 
 StreamPulse continuously pulls your manifests and segments the way a player would,
 parses them, and flags problems **before** viewers complain: frozen live edges,
@@ -130,10 +130,26 @@ is how most packagers write them.
 **`key_rotation_max_seconds`** flags a live stream whose keys have stopped
 rotating. It is opt-in because plenty of streams legitimately never rotate.
 
-## DASH (MPD parsing)
+## DASH
 
-The DASH manifest parser is implemented in `internal/dash`; the prober does not
-drive it yet, so nothing in the check table above runs against an MPD today.
+Point a target at an `.mpd` and it is probed: the manifest is fetched and
+parsed, every representation is enumerated, and the most recent segments of
+each are fetch-checked. Findings go through the same incidents, maintenance
+windows and metrics as the HLS path.
+
+What runs against DASH today is the availability half of the check table:
+
+| Check | Severity | What it catches |
+|---|---|---|
+| `manifest_fetch` | critical | Origin/CDN unreachable or non-200 |
+| `manifest_parse` | critical | Response is not a parsable MPD (a CDN error page served with a 200) |
+| `manifest_empty` | warning | MPD parsed but declares no representations |
+| `no_segments` | critical | No segment is available in the current window |
+| `segment_availability` | critical | A segment the MPD points at 404s / errors |
+
+The cross-poll and DRM rules -- `playlist_stalled`, `playlist_rollback`,
+`short_window`, the PDT family, `expect_encrypted` -- are still HLS-only. They
+port onto the same state machine and are the next piece of work.
 
 Parsing an MPD is a different job from parsing a playlist. Almost nothing a
 prober needs is stated outright: segment URLs live in templates, period start
@@ -151,6 +167,24 @@ for _, r := range m.Representations() {
     }
 }
 ```
+
+Three per-target knobs:
+
+```json
+"type": "dash",                          // omit to detect from the response body
+"max_representations": 1,                // per adaptation set; 0 = all
+"representation_types": ["video","audio"]
+```
+
+`max_representations` caps **per adaptation set**, not per manifest, and keeps
+the highest-bandwidth rungs. A flat cap over a flattened ladder would truncate
+wherever the packager happened to put the boundary: on a document listing six
+video rungs before its audio, "max 3" would stop probing audio entirely --
+exactly the break this tool exists to catch. Per set, `1` means "the top rung
+of every track".
+
+`type` is optional because the response body is unambiguous, but naming it
+turns "unrecognized" into a parse error that says what was actually served.
 
 What is handled:
 
@@ -175,6 +209,14 @@ a healthy stream.
 Enumeration is arithmetic rather than iterative, and capped. A channel that has
 been live for a week is hundreds of thousands of segments deep, and only the
 last few minutes of it are fetchable.
+
+One shape difference from HLS is worth naming: an MPD is a single document
+that already describes every representation, so there is no second fetch per
+rung of the ladder. That is why `streampulse_variant_up` and
+`streampulse_media_fetch_seconds` have no DASH equivalent -- there is no
+per-representation manifest to be up -- while `streampulse_media_sequence`
+does: the newest segment number is the live-edge position, and it advances the
+same way `EXT-X-MEDIA-SEQUENCE` does.
 
 Where the spec leaves room, the parser takes the tolerant reading and leaves
 the judgement to the check layer: a malformed `@suggestedPresentationDelay`
@@ -270,6 +312,7 @@ matches is worse than one that refuses to load.
 `streampulse_playlist_window_seconds`, `streampulse_segment_count`,
 `streampulse_segment_available`, `streampulse_segment_ttfb_seconds`,
 `streampulse_variant_count`, `streampulse_rendition_count`,
+`streampulse_period_count`, `streampulse_representation_count`,
 `streampulse_findings_total`,
 `streampulse_key_count`, `streampulse_key_available`,
 `streampulse_key_fetch_seconds`,
@@ -304,7 +347,8 @@ and now redirects to an HTML page -- StreamPulse flags it as
                 +---------+---------+
                           |
              +------------v------------+
-             |   probe.ProbeTarget     |  fetch master -> variants -> media
+             |   probe.ProbeTarget     |  HLS: master -> variants -> media
+             |                         |  DASH: MPD -> representations
              |   + runChecks (state)   |  + sample recent segments
              +----+---------------+----+
                   |               |
@@ -338,9 +382,10 @@ Packages: `hls` and `dash` (manifest parsers), `probe` (prober + checks),
 
 ## Roadmap
 
-- **DASH probing**: drive the MPD parser from the prober -- segment availability,
-  live-edge freeze, multi-period continuity, and the DRM checks against
-  `ContentProtection`
+- **DASH checks**: port the cross-poll rules onto the DASH path -- live-edge
+  freeze and rollback, window size, wall-clock staleness -- plus multi-period
+  continuity, `@publishTime` not advancing within `@minimumUpdatePeriod`, and
+  the DRM checks against `ContentProtection`
 - **MPEG-TS / IPTV**: TR 101 290 P1/P2/P3-style checks (PCR jitter, CC errors, PAT/PMT integrity) via TSDuck
 - **Deep segment inspection**: decode a frame (ffprobe) for black/freeze, codec/res vs declared, PTS continuity
 - **Multi-vantage probing** (run from several regions; compare)
@@ -349,6 +394,6 @@ Packages: `hls` and `dash` (manifest parsers), `probe` (prober + checks),
 
 ## Status
 
-MVP. The HLS path is implemented and tested end to end (`make test`). The DASH
-MPD parser is implemented and tested but not yet wired into the prober. Not yet
-production-hardened.
+MVP. The HLS path is implemented and tested end to end (`make test`). DASH is
+probed for reachability and segment availability; its cross-poll and DRM checks
+are not written yet. Not yet production-hardened.

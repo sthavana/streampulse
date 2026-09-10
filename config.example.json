@@ -31,6 +31,15 @@
       "min_window_seconds": 0
     },
     {
+      "name": "example-dash-live",
+      "url": "https://demo.unified-streaming.com/k8s/live/stable/scte35.isml/.mpd",
+      "type": "dash",
+      "interval_seconds": 8,
+      "max_representations": 1,
+      "representation_types": ["video", "audio"],
+      "segment_sample": 2
+    },
+    {
       "name": "example-live-channel",
       "url": "https://example.com/live/channel1/master.m3u8",
       "interval_seconds": 6,

@@ -9,13 +9,28 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"strings"
 	"sync"
 	"time"
 
 	"streampulse/internal/alert"
 	"streampulse/internal/config"
+	"streampulse/internal/dash"
 	"streampulse/internal/hls"
 	"streampulse/internal/metrics"
+)
+
+// Help text for the series both manifest formats emit. Registry.register keeps
+// whichever help text arrives first, so the HLS and DASH paths declaring the
+// same series differently would silently ship whichever ran first.
+const (
+	helpProbeUp       = "1 if the target manifest is reachable"
+	helpManifestFetch = "Time to fetch the top-level manifest"
+	helpSequence      = "Live-edge sequence (EXT-X-MEDIA-SEQUENCE, or the newest DASH segment number)"
+	helpWindow        = "Length of the live/DVR window in seconds"
+	helpSegmentCount  = "Segments in the current window"
+	helpSegmentUp     = "1 if a sampled segment is fetchable"
+	helpSegmentTTFB   = "Time-to-first-byte for a sampled segment"
 )
 
 type Prober struct {
@@ -51,9 +66,9 @@ func (p *Prober) ProbeTarget(ctx context.Context, t config.Target) {
 	labels := map[string]string{"target": t.Name}
 
 	raw, dur, status, err := p.fetch(ctx, t.URL)
-	p.reg.SetGauge("streampulse_manifest_fetch_seconds", "Time to fetch the top-level manifest", dur.Seconds(), labels)
+	p.reg.SetGauge("streampulse_manifest_fetch_seconds", helpManifestFetch, dur.Seconds(), labels)
 	if err != nil || status != http.StatusOK {
-		p.reg.SetGauge("streampulse_probe_up", "1 if the target manifest is reachable", 0, labels)
+		p.reg.SetGauge("streampulse_probe_up", helpProbeUp, 0, labels)
 		msg := "manifest returned HTTP " + itoa(status)
 		if err != nil {
 			msg = err.Error()
@@ -61,7 +76,32 @@ func (p *Prober) ProbeTarget(ctx context.Context, t config.Target) {
 		p.emit(t.Name, "", alert.Critical, "manifest_fetch", msg)
 		return
 	}
-	p.reg.SetGauge("streampulse_probe_up", "1 if the target manifest is reachable", 1, labels)
+	p.reg.SetGauge("streampulse_probe_up", helpProbeUp, 1, labels)
+
+	if isDASH(t, raw) {
+		p.probeDASH(ctx, t, raw)
+		return
+	}
+	p.probeHLS(ctx, t, raw)
+}
+
+// isDASH decides which parser a response belongs to. An explicit target type
+// wins; otherwise the body decides, which keeps a plain URL working with no
+// configuration. Note that a target declared "dash" is not second-guessed
+// here: it goes to dash.Parse and comes back with a parse error naming what
+// the body actually was, which is more use than "unrecognized".
+func isDASH(t config.Target, raw string) bool {
+	switch strings.ToLower(t.Type) {
+	case "dash":
+		return true
+	case "hls":
+		return false
+	}
+	return dash.LooksLikeMPD([]byte(raw))
+}
+
+func (p *Prober) probeHLS(ctx context.Context, t config.Target, raw string) {
+	labels := map[string]string{"target": t.Name}
 
 	switch hls.DetectType(raw) {
 	case hls.Master:
@@ -92,7 +132,7 @@ func (p *Prober) ProbeTarget(ctx context.Context, t config.Target) {
 	case hls.Media:
 		p.probeMedia(ctx, t, t.URL, "direct")
 	default:
-		p.emit(t.Name, "", alert.Warning, "unknown_playlist", "response was not a recognizable HLS playlist")
+		p.emit(t.Name, "", alert.Warning, "unknown_playlist", "response was not a recognizable HLS playlist or DASH MPD")
 	}
 }
 
@@ -109,9 +149,9 @@ func (p *Prober) probeMedia(ctx context.Context, t config.Target, mediaURL, vari
 	p.reg.SetGauge("streampulse_variant_up", "1 if the media playlist is reachable", 1, labels)
 
 	pl := hls.ParseMedia(raw)
-	p.reg.SetGauge("streampulse_media_sequence", "EXT-X-MEDIA-SEQUENCE of the playlist", float64(pl.MediaSequence), labels)
-	p.reg.SetGauge("streampulse_playlist_window_seconds", "Sum of segment durations (live/DVR window)", pl.Duration(), labels)
-	p.reg.SetGauge("streampulse_segment_count", "Segment count in the current playlist", float64(len(pl.Segments)), labels)
+	p.reg.SetGauge("streampulse_media_sequence", helpSequence, float64(pl.MediaSequence), labels)
+	p.reg.SetGauge("streampulse_playlist_window_seconds", helpWindow, pl.Duration(), labels)
+	p.reg.SetGauge("streampulse_segment_count", helpSegmentCount, float64(len(pl.Segments)), labels)
 
 	for _, f := range p.runChecks(t, mediaURL, variant, pl) {
 		p.record(f)
@@ -121,32 +161,36 @@ func (p *Prober) probeMedia(ctx context.Context, t config.Target, mediaURL, vari
 	}
 
 	if t.SegmentSample > 0 && len(pl.Segments) > 0 {
-		p.sampleSegments(ctx, t, mediaURL, variant, pl)
+		urls := make([]string, len(pl.Segments))
+		for i, s := range pl.Segments {
+			urls[i] = resolveURL(mediaURL, s.URI)
+		}
+		p.sampleSegments(ctx, t, variant, urls)
 	}
 }
 
-// sampleSegments fetch-checks the most recent N segments (the live edge, where
-// availability problems usually first appear).
-func (p *Prober) sampleSegments(ctx context.Context, t config.Target, plURL, variant string, pl *hls.MediaPlaylist) {
+// sampleSegments fetch-checks the most recent N of the given segment URLs (the
+// live edge, where availability problems usually first appear). It takes
+// resolved URLs rather than a playlist so that both manifest formats share it.
+func (p *Prober) sampleSegments(ctx context.Context, t config.Target, variant string, urls []string) {
 	labels := map[string]string{"target": t.Name, "variant": variant}
 	n := t.SegmentSample
-	if n > len(pl.Segments) {
-		n = len(pl.Segments)
+	if n > len(urls) {
+		n = len(urls)
 	}
-	for _, s := range pl.Segments[len(pl.Segments)-n:] {
-		segURL := resolveURL(plURL, s.URI)
-		ttfb, status, err := p.probeSegment(ctx, segURL)
+	for _, u := range urls[len(urls)-n:] {
+		ttfb, status, err := p.probeSegment(ctx, u)
 		if err != nil || status >= 400 {
-			p.reg.SetGauge("streampulse_segment_available", "1 if a sampled segment is fetchable", 0, labels)
+			p.reg.SetGauge("streampulse_segment_available", helpSegmentUp, 0, labels)
 			detail := "HTTP " + itoa(status)
 			if err != nil {
 				detail = err.Error()
 			}
-			p.emit(t.Name, variant, alert.Critical, "segment_availability", "segment not available ("+detail+"): "+s.URI)
+			p.emit(t.Name, variant, alert.Critical, "segment_availability", "segment not available ("+detail+"): "+u)
 			return
 		}
-		p.reg.SetGauge("streampulse_segment_available", "1 if a sampled segment is fetchable", 1, labels)
-		p.reg.SetGauge("streampulse_segment_ttfb_seconds", "Time-to-first-byte for a sampled segment", ttfb.Seconds(), labels)
+		p.reg.SetGauge("streampulse_segment_available", helpSegmentUp, 1, labels)
+		p.reg.SetGauge("streampulse_segment_ttfb_seconds", helpSegmentTTFB, ttfb.Seconds(), labels)
 	}
 }
 
