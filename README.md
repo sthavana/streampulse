@@ -59,8 +59,12 @@ make run
 # findings:  JSON lines on stdout
 ```
 
-Point `config.json` at public test streams to try it (e.g. Apple's bipbop
-examples for VOD; any of your live channels for the freeze/PDT checks).
+Point `config.json` at public test streams to try it. Apple's fMP4 bipbop
+example works for the VOD path; Unified Streaming's `scte35.isml` demo is a
+live channel with sparse PDT and ad markers, which exercises the freeze,
+rollback and PDT rules. (Apple's older `bipbop_adv_example_hls` URL is dead
+and now redirects to an HTML page -- StreamPulse flags it as
+`unknown_playlist`, which is the correct result.)
 
 ## Architecture
 

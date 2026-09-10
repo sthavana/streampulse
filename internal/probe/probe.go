@@ -31,7 +31,7 @@ type Prober struct {
 type plState struct {
 	lastSequence  int
 	lastSeqChange time.Time
-	lastPDT       *time.Time
+	lastEdge      *time.Time // projected live edge, not the raw PDT anchor tag
 }
 
 func New(reg *metrics.Registry, n alert.Notifier) *Prober {

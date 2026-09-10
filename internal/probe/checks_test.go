@@ -72,10 +72,6 @@ func TestLiveEdgePDTProjectsFromAnchorToEndOfWindow(t *testing.T) {
 	if want := anchor.Add(36 * time.Second); !edge.Equal(want) {
 		t.Errorf("edge = %v, want %v", edge, want)
 	}
-	// The anchor accessor must keep returning the tag value itself.
-	if got := lastPDT(pl); !got.Equal(anchor) {
-		t.Errorf("lastPDT = %v, want the anchor %v", got, anchor)
-	}
 }
 
 func TestLiveEdgePDTNilWhenNoProgramDateTime(t *testing.T) {
@@ -248,5 +244,85 @@ func TestFirstPollEstablishesBaselineWithoutCrossPollFindings(t *testing.T) {
 		if hasCheck(fs, name) {
 			t.Errorf("%s fired on the first poll, with nothing to compare against", name)
 		}
+	}
+}
+
+// --- sparse PDT, as emitted by real packagers ---
+
+// sparsePDTWindow builds the window starting at global segment startIdx, with
+// EXT-X-PROGRAM-DATE-TIME attached only every pdtEvery segments of the global
+// timeline. This mirrors Unified Streaming, which tags only discontinuity
+// boundaries: ~11 PDT tags across a 313-segment window.
+func sparsePDTWindow(startIdx, segs, pdtEvery int, segDur float64, epoch time.Time, targetDur int) *hls.MediaPlaylist {
+	pl := &hls.MediaPlaylist{Version: 4, TargetDuration: targetDur, MediaSequence: startIdx}
+	for i := 0; i < segs; i++ {
+		g := startIdx + i
+		s := hls.Segment{URI: "seg" + itoa(g) + ".ts", Duration: segDur}
+		if g%pdtEvery == 0 {
+			t := epoch.Add(time.Duration(float64(g) * segDur * float64(time.Second)))
+			s.ProgramDateTime = &t
+		}
+		pl.Segments = append(pl.Segments, s)
+	}
+	return pl
+}
+
+func TestLiveEdgePDTCorrectWhenAnchorIsMidWindow(t *testing.T) {
+	epoch := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	// Window covers global segments 1..50; the only anchor inside it is at 40.
+	pl := sparsePDTWindow(1, 50, 40, 2.0, epoch, 3)
+
+	edge := liveEdgePDT(pl)
+	if edge == nil {
+		t.Fatal("liveEdgePDT returned nil")
+	}
+	// Global segment 50 is last, so the true edge is epoch + 51 segments.
+	if want := epoch.Add(time.Duration(51 * 2.0 * float64(time.Second))); !edge.Equal(want) {
+		t.Errorf("edge = %v, want %v", edge, want)
+	}
+}
+
+func TestSparsePDTSlidingWindowDoesNotWarn(t *testing.T) {
+	epoch := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	const segDur, pdtEvery, segs = 2.0, 40, 50
+
+	// Start the clock at the live edge of the first window.
+	start := epoch.Add(time.Duration(float64(segs) * segDur * float64(time.Second)))
+	pr, clk := newTestProber(start)
+
+	// Slide one segment at a time. Throughout, the last PDT *tag* in the window
+	// stays pinned at global segment 40, which is exactly what used to trip
+	// pdt_not_advancing on every poll.
+	for i := 0; i < 8; i++ {
+		pl := sparsePDTWindow(i, segs, pdtEvery, segDur, epoch, 3)
+		fs := pr.runChecks(target, "u", "v", pl)
+		if hasCheck(fs, "pdt_not_advancing") {
+			t.Fatalf("poll %d: pdt_not_advancing fired on a healthy sparse-PDT stream: %v", i, checks(fs))
+		}
+		if hasCheck(fs, "pdt_stale") {
+			t.Fatalf("poll %d: pdt_stale fired at a healthy live edge: %v", i, checks(fs))
+		}
+		clk.advance(time.Duration(segDur * float64(time.Second)))
+	}
+}
+
+func TestSparsePDTFrozenTimelineStillWarns(t *testing.T) {
+	epoch := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	const segDur, pdtEvery, segs = 2.0, 40, 50
+
+	start := epoch.Add(time.Duration(float64(segs) * segDur * float64(time.Second)))
+	pr, clk := newTestProber(start)
+
+	pr.runChecks(target, "u", "v", sparsePDTWindow(0, segs, pdtEvery, segDur, epoch, 3))
+
+	// Sequence advances, but the packager republishes the same PDT timeline:
+	// the window slid without the clock moving. A genuine fault.
+	clk.advance(time.Duration(segDur * float64(time.Second)))
+	frozen := sparsePDTWindow(0, segs, pdtEvery, segDur, epoch, 3)
+	frozen.MediaSequence = 1
+
+	fs := pr.runChecks(target, "u", "v", frozen)
+	if !hasCheck(fs, "pdt_not_advancing") {
+		t.Fatalf("expected pdt_not_advancing on a frozen timeline, got %v", checks(fs))
 	}
 }

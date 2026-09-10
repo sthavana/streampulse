@@ -74,7 +74,12 @@ func (p *Prober) runChecks(t config.Target, plURL, variant string, pl *hls.Media
 // playlist URL: freeze detection, window rollback, and PDT progression.
 func (p *Prober) crossPollChecks(now time.Time, t config.Target, plURL, variant string, pl *hls.MediaPlaylist) []alert.Finding {
 	var out []alert.Finding
-	anchorPDT := lastPDT(pl)
+	// Compare the projected live edge, not the raw anchor tag: packagers emit
+	// PDT sparsely (Unified Streaming tags only discontinuity boundaries, ~11
+	// tags across a 313-segment window), so the last *tag* sits frozen for
+	// dozens of segments while the stream is perfectly healthy. The projected
+	// edge advances with every segment added.
+	edge := liveEdgePDT(pl)
 
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -83,7 +88,7 @@ func (p *Prober) crossPollChecks(now time.Time, t config.Target, plURL, variant 
 	if st == nil {
 		// First sighting: record a baseline. There is nothing to compare against
 		// yet, so no cross-poll rule can fire.
-		p.state[plURL] = &plState{lastSequence: pl.MediaSequence, lastSeqChange: now, lastPDT: anchorPDT}
+		p.state[plURL] = &plState{lastSequence: pl.MediaSequence, lastSeqChange: now, lastEdge: edge}
 		return out
 	}
 
@@ -114,15 +119,15 @@ func (p *Prober) crossPollChecks(now time.Time, t config.Target, plURL, variant 
 		}
 	}
 
-	// PDT is only expected to move when the window itself moved. Comparing it on
-	// every poll fires spuriously whenever the poll interval is shorter than a
-	// segment duration, which is the common configuration.
-	if anchorPDT != nil {
-		if seqAdvanced && st.lastPDT != nil && !anchorPDT.After(*st.lastPDT) {
+	// The edge is only expected to move when the window itself moved. Comparing
+	// on every poll fires spuriously whenever the poll interval is shorter than
+	// a segment duration, which is the common configuration.
+	if edge != nil {
+		if seqAdvanced && st.lastEdge != nil && !edge.After(*st.lastEdge) {
 			out = append(out, finding(now, t, variant, alert.Warning, "pdt_not_advancing",
-				"media sequence advanced but EXT-X-PROGRAM-DATE-TIME did not"))
+				"media sequence advanced but the PROGRAM-DATE-TIME timeline did not"))
 		}
-		st.lastPDT = anchorPDT
+		st.lastEdge = edge
 	}
 
 	return out
@@ -154,17 +159,6 @@ func finding(now time.Time, t config.Target, variant string, sev alert.Severity,
 		Time: now, Target: t.Name, Variant: variant,
 		Severity: sev, Check: check, Message: msg,
 	}
-}
-
-// lastPDT returns the most recent EXT-X-PROGRAM-DATE-TIME value carried in the
-// playlist, i.e. the anchor tag itself, not the time of the live edge.
-func lastPDT(pl *hls.MediaPlaylist) *time.Time {
-	for i := len(pl.Segments) - 1; i >= 0; i-- {
-		if pl.Segments[i].ProgramDateTime != nil {
-			return pl.Segments[i].ProgramDateTime
-		}
-	}
-	return nil
 }
 
 // liveEdgePDT projects the wall-clock time at which the last segment ends.
