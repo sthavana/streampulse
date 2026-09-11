@@ -1,27 +1,116 @@
 # StreamPulse
 
 [![CI](https://github.com/sthavana/pulsemark/actions/workflows/ci.yml/badge.svg)](https://github.com/sthavana/pulsemark/actions/workflows/ci.yml)
+[![Go](https://img.shields.io/badge/go-1.22%2B-00ADD8)](https://go.dev)
+[![License](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 
-Proactive, synthetic health monitoring for OTT / IPTV streaming — HLS and DASH.
+**Synthetic health monitoring for HLS and DASH.** It pulls your manifests and
+segments the way a player would, and tells you what is broken before viewers do
+— and *which layer* broke.
 
-StreamPulse continuously pulls your manifests and segments the way a player would,
-parses them, and flags problems **before** viewers complain: frozen live edges,
-stalled playlists, segments that 404 on the CDN, spec violations, and more. It
-exposes Prometheus metrics and streams structured findings (stdout JSON, Slack).
+![The operator view](docs/screenshot.png)
 
-> Working codename — check trademark availability before using it commercially.
+## The problem
 
-## Why
+Streaming monitoring is mostly passive: ingest logs, wait for a QoE dashboard to
+dip, then spend an hour working out whether it was the encoder, the packager or
+the CDN. By then people have already switched off.
 
-Most streaming monitoring is passive (ingest logs, wait for QoE dashboards to dip)
-and single-layer. The expensive, unsolved problem operators actually have is
-**catching a break at the manifest/segment layer early, and knowing which layer
-caused it**. StreamPulse is a synthetic prober built around that: it *actively*
-validates the stream from wherever it runs, on a tight schedule.
+StreamPulse probes actively instead, on a tight schedule, from wherever you run
+it. It parses what it gets back the way a player would and reports faults as
+they appear — 42 checks across both formats, deduplicated into incidents
+so one frozen playlist is one alert rather than 900.
 
-The near-term wedge: **self-hostable** (no shipping stream data to a SaaS),
-**dependency-light**, and **API/metrics-first** so it drops straight into an
-existing Prometheus + Grafana + Alertmanager stack.
+And where it can, it says which layer to look at:
+
+![Incidents naming the layer at fault](docs/screenshot-incident.png)
+
+Every one of those is the same fault a player would hit, seen from outside. The
+bracketed part is the interesting bit: a manifest 300s old out of a CDN cache
+accounts for a 300s lag on its own, so the packager was only 3.9s behind when it
+wrote it. That is the difference between waking the CDN team and waking the
+encoding team.
+
+## Quickstart
+
+Requires Go 1.22+. No dependencies to install.
+
+```bash
+cp config.example.json config.json   # point it at your streams
+make run                             # http://localhost:9090
+```
+
+Or the whole stack — prober, Prometheus, Grafana — against public test streams:
+
+```bash
+make compose-up
+```
+
+| | |
+|---|---|
+| StreamPulse UI | http://localhost:9090 |
+| Prometheus | http://localhost:9091 |
+| Grafana | http://localhost:3000 |
+| findings | JSON lines on stdout |
+
+## What it catches
+
+| | |
+|---|---|
+| **Availability** | manifests and segments that 404, time out, or return something that is not a manifest |
+| **Liveness** | frozen live edges, timelines going backwards, windows shorter than declared, edges drifting behind wall clock |
+| **Structure** | spec violations, dangling rendition groups, missing initialisation sections, empty playlists |
+| **DRM** | unretrievable keys, clear segments on an encrypted stream, malformed PSSH, keys that stopped rotating |
+| **Low latency** | chunked delivery silently degraded to whole-segment buffering, latency past the declared bound |
+| **The media itself** | codec and resolution that disagree with the manifest, declared tracks that are not there *(optional, needs ffprobe)* |
+| **Which layer** | origin versus CDN edge, from the cache headers on the response |
+
+Each is a named check with a severity; the tables further down list every one.
+
+## Design in one paragraph
+
+Standard library only — the HLS and DASH parsers, the Prometheus exposition, the
+web UI and the notifiers are all written here and all small. The single
+exception is media inspection, which shells out to ffprobe and is optional, off
+by default, and in its own image, because writing a demuxer would be
+reinventing something ffmpeg has spent twenty years getting right. Findings are
+deduplicated into incidents before anyone is told. Checks that cannot be
+answered honestly abstain rather than guess, and the sections below say where
+and why.
+
+## Positioning
+
+**Self-hostable** — no shipping stream data to a SaaS. **Dependency-light** —
+one static binary, and the only optional dependency is namable in a sentence.
+**Metrics-first** — it drops into an existing Prometheus, Grafana and
+Alertmanager stack rather than asking you to adopt another dashboard, and the
+web UI above answers the question those cannot: what is happening *right now*.
+
+## Contents
+
+**Checks**
+[HLS](#what-it-checks-today-hls) ·
+[renditions](#renditions-ext-x-media) ·
+[init sections](#initialisation-sections-ext-x-map) ·
+[DRM](#drm-and-ext-x-key) ·
+[DASH](#dash) ·
+[which layer broke](#which-layer-broke-cache-attribution) ·
+[media inspection](#looking-inside-the-media-optional)
+
+**Operating it**
+[alerting](#alerting-incidents-not-findings) ·
+[maintenance windows](#maintenance-windows) ·
+[web UI](#web-ui) ·
+[metrics](#metrics-exposed-metrics) ·
+[deployment](#deployment)
+
+**About**
+[architecture](#architecture) ·
+[design choices](#deliberate-design-choices) ·
+[roadmap](#roadmap) ·
+[status](#status)
+
+---
 
 ## What it checks today (HLS)
 
@@ -438,6 +527,74 @@ is the cleanest origin-vs-edge signal available without instrumenting the CDN.
 Probe requests identify themselves as `StreamPulse/0.1 (synthetic prober)`, so
 they can be separated from real viewers in an origin access log.
 
+## Looking inside the media (optional)
+
+Every other check in this tool validates the **plumbing**: manifests parse,
+segments fetch, edges advance, keys exist. None of them opens a segment. A
+stream can pass all of them while shipping the wrong codec, the wrong
+resolution, or no audio at all.
+
+Closing that needs a demuxer, and writing one would be reinventing a wheel that
+ffmpeg has spent twenty years getting right. So this shells out to `ffprobe`
+instead -- the one place the project depends on anything outside the standard
+library, and deliberately the only optional one:
+
+```json
+"inspection": { "ffprobe": "auto" },
+"targets": [
+  { "name": "channel-1", "inspect": true, ... }
+]
+```
+
+`"auto"` finds it on `$PATH`, or give a path, or omit it entirely. **With no
+ffprobe the inspector reports itself unavailable at startup and every other
+check runs exactly as before.** It is off per target as well, because it spawns
+a process and fetches media.
+
+### What it costs, stated plainly
+
+The default image is 9MB on `scratch` with no shell and no package manager, and
+the README argues that as a security property. That argument does not survive
+adding ffmpeg, so **there are two images** rather than one compromise:
+
+| | |
+|---|---|
+| `Dockerfile` | 9MB, scratch, no inspection |
+| `Dockerfile.full` | 773MB, Debian + ffmpeg |
+
+773 against 9 is why they are separate. Run the small one unless you have
+turned inspection on.
+
+### What it deliberately does not check
+
+Only the codec *family* is compared -- `avc1` against h264 -- never the profile
+and level in the rest of the RFC 6381 string. Packagers get those subtly wrong
+constantly in ways no player minds, and a check firing on an imperceptible
+level mismatch gets switched off within a week, taking the codec check that
+matters with it.
+
+Encrypted media is skipped. ffprobe can read the container of a protected
+stream but not decode it, and its failure looks exactly like corruption --
+inspecting DRM content would mean it permanently failing a check it cannot pass.
+
+Anamorphic video is not a mismatch. Content coded 1440x1080 with a 4:3 pixel
+*is* 1920x1080 to a viewer, and comparing coded dimensions against a manifest
+that correctly declares the display size would flag it on every poll.
+
+A demuxed HLS variant is not missing its audio. It lists its rendition group's
+audio codec in `CODECS` while carrying video only, which is how most modern
+HLS is packaged. (This one was not foresight -- real ffprobe reported it
+against Apple's own example the first time it ran.)
+
+### How it fetches
+
+The prober downloads the bytes itself and hands ffprobe a file, rather than
+handing it a URL. ffprobe fetching its own URL means its HTTP stack, outside
+this tool's client, headers and timeouts -- and it reads as much as it wants.
+Pointed at Apple's fMP4 example, whose `EXT-X-MAP` slices a few kilobytes out
+of a **150MB** file, it downloaded the whole thing: 18 seconds per variant per
+poll. Fetching exactly the declared byte range takes 0.07s.
+
 ## Alerting: incidents, not findings
 
 A prober re-observes a fault on every poll. Sent straight to Slack, one frozen
@@ -595,26 +752,7 @@ somewhere private, as you would for `/metrics` itself.
 `streampulse_incidents_resolved_total`, `streampulse_maintenance_active`,
 `streampulse_notifications_suppressed_total`.
 
-## Quickstart
-
-Requires Go 1.22+.
-
-```bash
-cp config.example.json config.json   # edit targets
-make check                           # gofmt + vet + tests with -race, what CI runs
-make run                             # or: make compose-up for the full stack
-# metrics:   curl localhost:9090/metrics
-# findings:  JSON lines on stdout
-```
-
-Point `config.json` at public test streams to try it. Apple's fMP4 bipbop
-example works for the VOD path; Unified Streaming's `scte35.isml` demo is a
-live channel with sparse PDT and ad markers, which exercises the freeze,
-rollback and PDT rules. (Apple's older `bipbop_adv_example_hls` URL is dead
-and now redirects to an HTML page -- StreamPulse flags it as
-`unknown_playlist`, which is the correct result.)
-
-## Running it
+## Deployment
 
 ### Docker
 
@@ -625,36 +763,26 @@ docker run --rm -p 9090:9090 \
   streampulse
 ```
 
-The image is a static binary on `scratch` plus a CA bundle -- a few megabytes,
-no shell, no package manager, nothing else in it that can carry a CVE. That is
-a direct dividend of the zero-dependency stance: the timezone database is
-already compiled in (`time/tzdata`), so maintenance windows resolve their
-locations with no system tzdata to install.
+The image is a static binary on `scratch` plus a CA bundle -- 9MB, no shell, no
+package manager, nothing in it that can carry a CVE. That is a dividend of the
+zero-dependency stance rather than an effort: the timezone database is already
+compiled in, so maintenance windows resolve their locations with no system
+tzdata to install. It runs as uid 65534 and serves `/healthz`.
 
-It runs as uid 65534 and serves `/healthz` for an orchestrator's probe. There
-is no `HEALTHCHECK` in the image because `scratch` has no shell to run one
-with.
+`Dockerfile.full` is the same binary on a base with ffmpeg, for media
+inspection. It is 773MB, which is why it is a second image rather than a change
+to the first.
 
-### The whole stack
+### The demo stack
 
 ```bash
-make compose-up     # or: docker compose -f deploy/docker-compose.yml up --build
+make compose-up
 ```
 
 Brings up the prober, Prometheus and Grafana against public test streams --
 Unified Streaming's live channel in **both** HLS and DASH, which is the same
-content through both code paths side by side, plus Apple's fMP4 VOD.
-
-| | |
-|---|---|
-| Grafana | http://localhost:3000 (anonymous, no login) |
-| Prometheus | http://localhost:9091 |
-| StreamPulse UI | http://localhost:9090 |
-| prober metrics | http://localhost:9090/metrics |
-| findings | `docker compose -f deploy/docker-compose.yml logs -f prober` |
-
-Edit `deploy/config.json` for your own streams and
-`docker compose restart prober`.
+content through both code paths side by side, plus Apple's fMP4 VOD. Edit
+`deploy/config.json` for your own streams and `docker compose restart prober`.
 
 ### Alerting
 
@@ -673,17 +801,17 @@ flapping -- findings are deduplicated into incidents, and
 opens at all. A second `for:` in Prometheus would mean two places to reason
 about when something pages, and two places to get it wrong.
 
-The rest of the rules cover what the incident machinery cannot: the prober
-being unscrapeable, and two symptoms worth seeing before they become faults
-(a climbing manifest cache age, and segment TTFB).
+The rest of the rules cover what the incident machinery cannot: the prober being
+unscrapeable, and two symptoms worth seeing before they become faults (a
+climbing manifest cache age, and segment TTFB).
 
 ### Verified
 
-The stack in `deploy/` has been run end to end: the image builds (9.3MB),
-probes real streams over HTTPS from `scratch`, Prometheus scrapes it, all six
-alert rules load, Grafana provisions its datasource and dashboard, and a
-deliberately broken target produces a firing `StreamPulseCritical` carrying the
-check name and target as labels.
+The stack in `deploy/` has been run end to end: the image builds, probes real
+streams over HTTPS from `scratch`, Prometheus scrapes it, all six alert rules
+load, Grafana provisions its datasource and dashboard, and a deliberately broken
+target produces a firing `StreamPulseCritical` carrying the check name and
+target as labels.
 
 ### Known rough edge
 
@@ -721,74 +849,6 @@ Restarting the prober clears it.
 Packages: `hls` and `dash` (manifest parsers), `probe` (prober + checks),
 `metrics` (Prometheus exposition), `alert` (findings + notifiers), `config`
 (targets).
-
-## Looking inside the media (optional)
-
-Every other check in this tool validates the **plumbing**: manifests parse,
-segments fetch, edges advance, keys exist. None of them opens a segment. A
-stream can pass all of them while shipping the wrong codec, the wrong
-resolution, or no audio at all.
-
-Closing that needs a demuxer, and writing one would be reinventing a wheel that
-ffmpeg has spent twenty years getting right. So this shells out to `ffprobe`
-instead -- the one place the project depends on anything outside the standard
-library, and deliberately the only optional one:
-
-```json
-"inspection": { "ffprobe": "auto" },
-"targets": [
-  { "name": "channel-1", "inspect": true, ... }
-]
-```
-
-`"auto"` finds it on `$PATH`, or give a path, or omit it entirely. **With no
-ffprobe the inspector reports itself unavailable at startup and every other
-check runs exactly as before.** It is off per target as well, because it spawns
-a process and fetches media.
-
-### What it costs, stated plainly
-
-The default image is 9MB on `scratch` with no shell and no package manager, and
-the README argues that as a security property. That argument does not survive
-adding ffmpeg, so **there are two images** rather than one compromise:
-
-| | |
-|---|---|
-| `Dockerfile` | 9MB, scratch, no inspection |
-| `Dockerfile.full` | 773MB, Debian + ffmpeg |
-
-773 against 9 is why they are separate. Run the small one unless you have
-turned inspection on.
-
-### What it deliberately does not check
-
-Only the codec *family* is compared -- `avc1` against h264 -- never the profile
-and level in the rest of the RFC 6381 string. Packagers get those subtly wrong
-constantly in ways no player minds, and a check firing on an imperceptible
-level mismatch gets switched off within a week, taking the codec check that
-matters with it.
-
-Encrypted media is skipped. ffprobe can read the container of a protected
-stream but not decode it, and its failure looks exactly like corruption --
-inspecting DRM content would mean it permanently failing a check it cannot pass.
-
-Anamorphic video is not a mismatch. Content coded 1440x1080 with a 4:3 pixel
-*is* 1920x1080 to a viewer, and comparing coded dimensions against a manifest
-that correctly declares the display size would flag it on every poll.
-
-A demuxed HLS variant is not missing its audio. It lists its rendition group's
-audio codec in `CODECS` while carrying video only, which is how most modern
-HLS is packaged. (This one was not foresight -- real ffprobe reported it
-against Apple's own example the first time it ran.)
-
-### How it fetches
-
-The prober downloads the bytes itself and hands ffprobe a file, rather than
-handing it a URL. ffprobe fetching its own URL means its HTTP stack, outside
-this tool's client, headers and timeouts -- and it reads as much as it wants.
-Pointed at Apple's fMP4 example, whose `EXT-X-MAP` slices a few kilobytes out
-of a **150MB** file, it downloaded the whole thing: 18 seconds per variant per
-poll. Fetching exactly the declared byte range takes 0.07s.
 
 ## Deliberate design choices
 
