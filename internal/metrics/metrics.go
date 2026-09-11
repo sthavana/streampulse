@@ -20,6 +20,18 @@ type Registry struct {
 	help  map[string]string  // metric name -> HELP text
 	types map[string]string  // metric name -> TYPE
 	order []string           // metric names in first-seen order
+	// meta remembers each series in structured form. The exposition format
+	// only ever needs the flattened key, but a reader -- the web UI -- needs
+	// the labels back, and re-parsing them out of the key would be a parser
+	// nobody should have to write twice.
+	meta map[string]Sample
+}
+
+// Sample is one series in structured form.
+type Sample struct {
+	Name   string            `json:"name"`
+	Labels map[string]string `json:"labels,omitempty"`
+	Value  float64           `json:"value"`
 }
 
 func New() *Registry {
@@ -27,6 +39,7 @@ func New() *Registry {
 		vals:  make(map[string]float64),
 		help:  make(map[string]string),
 		types: make(map[string]string),
+		meta:  make(map[string]Sample),
 	}
 }
 
@@ -43,7 +56,9 @@ func (r *Registry) SetGauge(name, help string, value float64, labels map[string]
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.register(name, "gauge", help)
-	r.vals[seriesKey(name, labels)] = value
+	key := seriesKey(name, labels)
+	r.vals[key] = value
+	r.remember(key, name, labels)
 }
 
 // IncCounter increments a counter series by one.
@@ -51,7 +66,38 @@ func (r *Registry) IncCounter(name, help string, labels map[string]string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.register(name, "counter", help)
-	r.vals[seriesKey(name, labels)]++
+	key := seriesKey(name, labels)
+	r.vals[key]++
+	r.remember(key, name, labels)
+}
+
+// remember stores the structured form of a series. Called with the lock held.
+func (r *Registry) remember(key, name string, labels map[string]string) {
+	if _, ok := r.meta[key]; ok {
+		return
+	}
+	cp := make(map[string]string, len(labels))
+	for k, v := range labels {
+		cp[k] = v
+	}
+	r.meta[key] = Sample{Name: name, Labels: cp}
+}
+
+// Snapshot returns every series with its labels and current value.
+func (r *Registry) Snapshot() []Sample {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	out := make([]Sample, 0, len(r.vals))
+	for key, v := range r.vals {
+		s := r.meta[key]
+		s.Value = v
+		if s.Name == "" {
+			s.Name = key // a series recorded before meta existed; should not happen
+		}
+		out = append(out, s)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
+	return out
 }
 
 // Handler serves the Prometheus text exposition format.

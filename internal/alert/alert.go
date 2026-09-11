@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"os"
+	"sync"
 	"time"
 )
 
@@ -113,4 +114,44 @@ func (m multi) Notify(f Finding) {
 	for _, n := range m {
 		n.Notify(f)
 	}
+}
+
+// Recorder keeps the most recent notifications in memory so the web UI can
+// show what has happened lately.
+//
+// It sits in the notifier chain rather than reading from the tracker because
+// what belongs in a log is the transitions -- opened, cleared -- and those are
+// exactly what reaches a notifier. The tracker's own state answers the
+// different question of what is open right now.
+type Recorder struct {
+	mu   sync.Mutex
+	max  int
+	ring []Finding
+}
+
+func NewRecorder(max int) *Recorder {
+	if max <= 0 {
+		max = 200
+	}
+	return &Recorder{max: max}
+}
+
+func (r *Recorder) Notify(f Finding) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.ring = append(r.ring, f)
+	if len(r.ring) > r.max {
+		r.ring = r.ring[len(r.ring)-r.max:]
+	}
+}
+
+// Recent returns the notifications newest first.
+func (r *Recorder) Recent() []Finding {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	out := make([]Finding, 0, len(r.ring))
+	for i := len(r.ring) - 1; i >= 0; i-- {
+		out = append(out, r.ring[i])
+	}
+	return out
 }

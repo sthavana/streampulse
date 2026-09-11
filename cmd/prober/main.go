@@ -25,6 +25,7 @@ import (
 	"streampulse/internal/config"
 	"streampulse/internal/metrics"
 	"streampulse/internal/probe"
+	"streampulse/internal/web"
 )
 
 func main() {
@@ -38,7 +39,11 @@ func main() {
 
 	reg := metrics.New()
 
-	var notifier alert.Notifier = alert.NewJSONNotifier()
+	// The recorder keeps the last few hundred notifications in memory for the
+	// web UI. It sits in the chain rather than replacing anything: stdout stays
+	// the durable record.
+	recorder := alert.NewRecorder(200)
+	var notifier alert.Notifier = alert.Multi(alert.NewJSONNotifier(), recorder)
 	if cfg.SlackWebhook != "" {
 		notifier = alert.Multi(notifier, alert.NewSlackNotifier(cfg.SlackWebhook))
 	}
@@ -82,9 +87,13 @@ func main() {
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
 		_, _ = w.Write([]byte("ok"))
 	})
+	mux.Handle("/", web.Handler(web.Sources{
+		Registry: reg, Tracker: tracker, Recorder: recorder,
+		Targets: cfg.Targets, Started: time.Now(),
+	}))
 	srv := &http.Server{Addr: cfg.MetricsAddr, Handler: mux}
 	go func() {
-		log.Printf("metrics + health server on %s (/metrics, /healthz)", cfg.MetricsAddr)
+		log.Printf("web UI + metrics on %s (/, /metrics, /healthz)", cfg.MetricsAddr)
 		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			log.Printf("metrics server error: %v", err)
 		}

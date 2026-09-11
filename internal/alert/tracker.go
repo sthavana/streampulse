@@ -2,6 +2,7 @@ package alert
 
 import (
 	"log"
+	"sort"
 	"strconv"
 	"sync"
 	"time"
@@ -168,6 +169,59 @@ func (t *Tracker) Active() int {
 		}
 	}
 	return n
+}
+
+// Incident is a read-only view of one tracked incident, for the web UI.
+type Incident struct {
+	Target    string    `json:"target"`
+	Variant   string    `json:"variant,omitempty"`
+	Check     string    `json:"check"`
+	Severity  Severity  `json:"severity"`
+	Message   string    `json:"message"`
+	FirstSeen time.Time `json:"first_seen"`
+	LastSeen  time.Time `json:"last_seen"`
+	Count     int       `json:"count"`
+	// Announced is false for an incident being held quiet by a maintenance
+	// window. Showing it anyway is the point: suppression should be visible,
+	// not indistinguishable from health.
+	Announced bool `json:"announced"`
+}
+
+// Incidents lists what is open right now, worst first.
+func (t *Tracker) Incidents() []Incident {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
+	out := make([]Incident, 0, len(t.incidents))
+	for _, inc := range t.incidents {
+		if !inc.open {
+			continue
+		}
+		out = append(out, Incident{
+			Target: inc.last.Target, Variant: inc.last.Variant, Check: inc.last.Check,
+			Severity: inc.last.Severity, Message: inc.last.Message,
+			FirstSeen: inc.firstSeen.UTC(), LastSeen: inc.lastSeen.UTC(),
+			Count: inc.count, Announced: inc.announced,
+		})
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if a, b := severityRank(out[i].Severity), severityRank(out[j].Severity); a != b {
+			return a < b
+		}
+		return out[i].FirstSeen.Before(out[j].FirstSeen)
+	})
+	return out
+}
+
+func severityRank(s Severity) int {
+	switch s {
+	case Critical:
+		return 0
+	case Warning:
+		return 1
+	default:
+		return 2
+	}
 }
 
 // Tracking reports how many incidents are open, announced or not. During a

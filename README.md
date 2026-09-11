@@ -520,6 +520,38 @@ was withheld. A malformed window (bad timezone, bad clock, both forms at once)
 fails at startup rather than being ignored -- a window that silently never
 matches is worse than one that refuses to load.
 
+## Web UI
+
+The prober serves a read-only operator view on the same address as its metrics:
+
+```
+http://localhost:9090/          the page
+http://localhost:9090/api/state the JSON behind it
+```
+
+It deliberately graphs nothing. Prometheus and Grafana already do that better,
+and `deploy/` wires them up. This answers the different question you have while
+pointing the tool at a stream for the first time: what did it find, what is it
+probing, and is anything broken this second.
+
+- Every target with its format, live/VOD, poll interval, reachability, manifest
+  fetch time and cache verdict.
+- Every variant, rendition and representation underneath it, with segment
+  count, window length, live-edge position, TTFB, initialisation segment, DRM
+  and chunked delivery.
+- Open incidents, including ones a maintenance window is holding quiet -- the
+  suppression is shown rather than hidden.
+- Recent notifications, which are transitions rather than raw findings: a fault
+  re-observed on every poll appears once, not once per poll.
+
+It reads the metric registry rather than keeping its own copy of anything. Two
+records of the same observation drift, and the one on the dashboard is the one
+nobody notices is wrong.
+
+The page is served from the binary with no external assets, so it works on an
+air-gapped host. It is **unauthenticated and read-only**: bind `metrics_addr`
+somewhere private, as you would for `/metrics` itself.
+
 ## Metrics exposed (`/metrics`)
 
 `streampulse_probe_up`, `streampulse_variant_up`, `streampulse_manifest_fetch_seconds`,
@@ -592,6 +624,7 @@ content through both code paths side by side, plus Apple's fMP4 VOD.
 |---|---|
 | Grafana | http://localhost:3000 (anonymous, no login) |
 | Prometheus | http://localhost:9091 |
+| StreamPulse UI | http://localhost:9090 |
 | prober metrics | http://localhost:9090/metrics |
 | findings | `docker compose -f deploy/docker-compose.yml logs -f prober` |
 
@@ -683,7 +716,6 @@ Packages: `hls` and `dash` (manifest parsers), `probe` (prober + checks),
 - **Multi-vantage probing** (run from several regions; compare)
 - **Cross-layer correlation**: map a QoE symptom to the offending layer
   (started: manifest findings already carry an origin-vs-edge verdict)
-- **Web UI** over the incident state the tracker already keeps
 
 ## Status
 
