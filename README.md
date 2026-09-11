@@ -56,6 +56,10 @@ against alternative audio and subtitle tracks as well as the video ladder.
 | `key_rotation_stalled` | warning | Key unchanged for longer than the expected rotation interval |
 | `pssh_malformed` / `pssh_empty` | warning | Embedded PSSH box fails to parse or carries nothing |
 | `discontinuity_present` | info | Discontinuity markers in window (ad-break awareness) |
+| `codec_mismatch` | warning | The media carries a different codec from the one declared |
+| `resolution_mismatch` | warning | The media is a different resolution from the one declared |
+| `audio_track_missing` / `video_track_missing` | warning | A declared track is absent from the media |
+| `media_unreadable` | critical | The bytes arrived and ffprobe cannot read them |
 
 Each finding is also counted in `streampulse_findings_total{check,severity,...}`.
 
@@ -584,7 +588,8 @@ somewhere private, as you would for `/metrics` itself.
 `streampulse_findings_total`,
 `streampulse_key_count`, `streampulse_key_available`,
 `streampulse_init_segment_available`, `streampulse_chunked_delivery`,
-`streampulse_stream_live`,
+`streampulse_stream_live`, `streampulse_media_readable`,
+`streampulse_media_streams`, `streampulse_inspect_seconds`,
 `streampulse_key_fetch_seconds`,
 `streampulse_incident_active`, `streampulse_incidents_opened_total`,
 `streampulse_incidents_resolved_total`, `streampulse_maintenance_active`,
@@ -717,11 +722,82 @@ Packages: `hls` and `dash` (manifest parsers), `probe` (prober + checks),
 `metrics` (Prometheus exposition), `alert` (findings + notifiers), `config`
 (targets).
 
+## Looking inside the media (optional)
+
+Every other check in this tool validates the **plumbing**: manifests parse,
+segments fetch, edges advance, keys exist. None of them opens a segment. A
+stream can pass all of them while shipping the wrong codec, the wrong
+resolution, or no audio at all.
+
+Closing that needs a demuxer, and writing one would be reinventing a wheel that
+ffmpeg has spent twenty years getting right. So this shells out to `ffprobe`
+instead -- the one place the project depends on anything outside the standard
+library, and deliberately the only optional one:
+
+```json
+"inspection": { "ffprobe": "auto" },
+"targets": [
+  { "name": "channel-1", "inspect": true, ... }
+]
+```
+
+`"auto"` finds it on `$PATH`, or give a path, or omit it entirely. **With no
+ffprobe the inspector reports itself unavailable at startup and every other
+check runs exactly as before.** It is off per target as well, because it spawns
+a process and fetches media.
+
+### What it costs, stated plainly
+
+The default image is 9MB on `scratch` with no shell and no package manager, and
+the README argues that as a security property. That argument does not survive
+adding ffmpeg, so **there are two images** rather than one compromise:
+
+| | |
+|---|---|
+| `Dockerfile` | 9MB, scratch, no inspection |
+| `Dockerfile.full` | 773MB, Debian + ffmpeg |
+
+773 against 9 is why they are separate. Run the small one unless you have
+turned inspection on.
+
+### What it deliberately does not check
+
+Only the codec *family* is compared -- `avc1` against h264 -- never the profile
+and level in the rest of the RFC 6381 string. Packagers get those subtly wrong
+constantly in ways no player minds, and a check firing on an imperceptible
+level mismatch gets switched off within a week, taking the codec check that
+matters with it.
+
+Encrypted media is skipped. ffprobe can read the container of a protected
+stream but not decode it, and its failure looks exactly like corruption --
+inspecting DRM content would mean it permanently failing a check it cannot pass.
+
+Anamorphic video is not a mismatch. Content coded 1440x1080 with a 4:3 pixel
+*is* 1920x1080 to a viewer, and comparing coded dimensions against a manifest
+that correctly declares the display size would flag it on every poll.
+
+A demuxed HLS variant is not missing its audio. It lists its rendition group's
+audio codec in `CODECS` while carrying video only, which is how most modern
+HLS is packaged. (This one was not foresight -- real ffprobe reported it
+against Apple's own example the first time it ran.)
+
+### How it fetches
+
+The prober downloads the bytes itself and hands ffprobe a file, rather than
+handing it a URL. ffprobe fetching its own URL means its HTTP stack, outside
+this tool's client, headers and timeouts -- and it reads as much as it wants.
+Pointed at Apple's fMP4 example, whose `EXT-X-MAP` slices a few kilobytes out
+of a **150MB** file, it downloaded the whole thing: 18 seconds per variant per
+poll. Fetching exactly the declared byte range takes 0.07s.
+
 ## Deliberate design choices
 
-- **Zero external dependencies (stdlib only).** Compiles in seconds anywhere,
-  trivial to audit, nothing to CVE-patch. The HLS parser, the Prometheus
-  exposition, and the notifiers are all small and self-contained.
+- **Zero external dependencies (stdlib only)** in the core. Compiles in seconds
+  anywhere, trivial to audit, nothing to CVE-patch. The HLS and DASH parsers,
+  the Prometheus exposition, the web UI and the notifiers are all small and
+  self-contained. The single exception is media inspection, which shells out to
+  `ffprobe` -- kept optional, off by default, and in its own image, so the
+  property above still holds for anyone who does not need it.
 - **Clear swap points for scale.** When dependencies are warranted:
   the parser → `grafov/m3u8`; metrics → `prometheus/client_golang`;
   config → YAML; notifiers → add PagerDuty/webhook/DB sinks. None of these
@@ -731,14 +807,22 @@ Packages: `hls` and `dash` (manifest parsers), `probe` (prober + checks),
 
 ## Roadmap
 
-- **MPEG-TS / IPTV**: TR 101 290 P1/P2/P3-style checks (PCR jitter, CC errors, PAT/PMT integrity) via TSDuck
-- **Deep segment inspection**: decode a frame (ffprobe) for black/freeze, codec/res vs declared, PTS continuity
+- **MPEG-TS / IPTV**: TR 101 290 P1/P2/P3 via TSDuck. Worth being clear that
+  this is a *second input path*, not a deeper layer of the current one: TR 101
+  290 measures a continuous transport stream, usually multicast, where this
+  tool pulls HTTP. The timing measurements that are the point of it -- PCR
+  jitter, PTS repetition intervals -- cannot be taken from isolated segments
+- **Frame-level inspection**: black and frozen video, silent audio. Needs
+  ffmpeg's filters rather than ffprobe, and for fMP4 the initialisation segment
+  concatenated with a media segment before anything can be decoded
 - **Multi-vantage probing** (run from several regions; compare)
 - **Cross-layer correlation**: map a QoE symptom to the offending layer
   (started: manifest findings already carry an origin-vs-edge verdict)
 
 ## Status
 
-MVP. The HLS path is implemented and tested end to end (`make test`). DASH is
+MVP. Media inspection is optional and off by default; everything else is
+standard library only. The HLS path is implemented and tested end to end
+(`make test`). DASH is
 probed for reachability, segment availability, live-edge progression and the
 DRM its manifest declares. Not yet production-hardened.

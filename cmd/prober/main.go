@@ -23,6 +23,7 @@ import (
 
 	"streampulse/internal/alert"
 	"streampulse/internal/config"
+	"streampulse/internal/inspect"
 	"streampulse/internal/metrics"
 	"streampulse/internal/probe"
 	"streampulse/internal/web"
@@ -81,6 +82,16 @@ func main() {
 	}
 
 	pr := probe.New(reg, tracker)
+
+	// The one optional external dependency. A missing ffprobe disables the
+	// media checks and nothing else, so it is logged rather than fatal.
+	inspector, err := inspect.New(cfg.Inspection.FFprobe)
+	if err != nil {
+		log.Printf("media inspection disabled: %v", err)
+	} else if inspector.Available() {
+		log.Printf("media inspection using %s", inspector.Path())
+	}
+	pr.SetInspector(inspector, cfg.Inspection.Timeout())
 
 	mux := http.NewServeMux()
 	mux.Handle("/metrics", reg.Handler())

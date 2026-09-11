@@ -1,4 +1,4 @@
-.PHONY: build run test vet fmt check docker compose-up compose-down clean
+.PHONY: build run test vet fmt check docker docker-full compose-up compose-down clean
 
 build:
 	go build -o bin/prober ./cmd/prober
@@ -25,6 +25,10 @@ fmt:
 
 docker:
 	docker build -t streampulse:dev .
+
+# The inspection image: same binary, on a base that has ffprobe.
+docker-full:
+	docker build -f Dockerfile.full -t streampulse:dev-full .
 
 # The demo stack: prober + Prometheus + Grafana against public test streams.
 compose-up:

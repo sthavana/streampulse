@@ -122,6 +122,22 @@ func (m Map) Offset() (int64, bool) {
 	return n, true
 }
 
+// Length returns the size of the initialisation section in bytes, and whether
+// BYTERANGE stated one. It matters because the resource it slices can be the
+// entire presentation: Apple's fMP4 example points EXT-X-MAP at a 150MB file
+// and takes a few kilobytes out of the front of it.
+func (m Map) Length() (int64, bool) {
+	v := m.ByteRange
+	if i := strings.Index(v, "@"); i >= 0 {
+		v = v[:i]
+	}
+	n, err := strconv.ParseInt(strings.TrimSpace(v), 10, 64)
+	if err != nil || n <= 0 {
+		return 0, false
+	}
+	return n, true
+}
+
 // Segment is one media segment reference in a media playlist.
 // Key is the EXT-X-KEY in force for this segment, or nil if it is in the clear.
 // Map is the EXT-X-MAP in force, or nil for a playlist of self-contained

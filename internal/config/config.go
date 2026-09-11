@@ -33,6 +33,12 @@ type Target struct {
 	// a real outage and a prober that never sees one is measuring the wrong
 	// thing. Turn it on for a second target pointed past the cache, and
 	// compare the two.
+	// Inspect runs the media through ffprobe and compares what it contains
+	// against what the manifest declared. Off by default and per target: it
+	// spawns a process and makes its own fetch, so it is not something to turn
+	// on for forty targets without meaning to.
+	Inspect bool `json:"inspect,omitempty"`
+
 	NoCache bool              `json:"no_cache,omitempty"`
 	Headers map[string]string `json:"headers,omitempty"` // extra request headers (auth tokens, CDN overrides)
 
@@ -168,11 +174,32 @@ func (m MaintenanceWindow) window() (alert.Window, error) {
 	return w, nil
 }
 
+// Inspection configures the one optional external dependency.
+//
+// The core prober is standard library only, and stays that way: with no
+// ffprobe on the host these checks report themselves unavailable at startup
+// and everything else runs unchanged. The default container image ships
+// without it; the -full image has it.
+type Inspection struct {
+	// FFprobe is "" to disable, "auto" to find it on $PATH, or an explicit path.
+	FFprobe string `json:"ffprobe,omitempty"`
+	// TimeoutSeconds bounds one ffprobe run. Defaults to 20.
+	TimeoutSeconds int `json:"timeout_seconds,omitempty"`
+}
+
+func (i Inspection) Timeout() time.Duration {
+	if i.TimeoutSeconds <= 0 {
+		return 20 * time.Second
+	}
+	return time.Duration(i.TimeoutSeconds) * time.Second
+}
+
 // Config is the top-level configuration.
 type Config struct {
 	MetricsAddr  string              `json:"metrics_addr"`
 	SlackWebhook string              `json:"slack_webhook,omitempty"`
 	Alerting     Alerting            `json:"alerting"`
+	Inspection   Inspection          `json:"inspection,omitempty"`
 	Maintenance  []MaintenanceWindow `json:"maintenance,omitempty"`
 	Targets      []Target            `json:"targets"`
 }
@@ -221,6 +248,9 @@ func Load(path string) (*Config, error) {
 		return nil, fmt.Errorf("config has no targets")
 	}
 	for _, t := range c.Targets {
+		if t.Inspect && c.Inspection.FFprobe == "" {
+			return nil, fmt.Errorf("target %q sets inspect but inspection.ffprobe is not configured (use \"auto\")", t.Name)
+		}
 		switch strings.ToLower(t.Type) {
 		case "", "hls", "dash":
 		default:

@@ -1,0 +1,24 @@
+# StreamPulse with media inspection: the same binary, on a base that has
+# ffprobe.
+#
+# The default Dockerfile builds a 9MB scratch image with no shell, no package
+# manager and nothing to CVE-patch. That argument does not survive adding
+# ffmpeg, so this is a second image rather than a change to the first: run the
+# small one unless you have turned inspection on.
+FROM golang:1.22-alpine AS build
+WORKDIR /src
+COPY . .
+RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /prober ./cmd/prober
+
+FROM debian:bookworm-slim
+
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends ffmpeg ca-certificates \
+ && rm -rf /var/lib/apt/lists/*
+
+COPY --from=build /prober /usr/local/bin/prober
+
+USER nobody
+EXPOSE 9090
+ENTRYPOINT ["/usr/local/bin/prober"]
+CMD ["-config", "/etc/streampulse/config.json"]

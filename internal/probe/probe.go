@@ -17,6 +17,7 @@ import (
 	"streampulse/internal/config"
 	"streampulse/internal/dash"
 	"streampulse/internal/hls"
+	"streampulse/internal/inspect"
 	"streampulse/internal/metrics"
 )
 
@@ -24,26 +25,33 @@ import (
 // whichever help text arrives first, so the HLS and DASH paths declaring the
 // same series differently would silently ship whichever ran first.
 const (
-	helpProbeUp       = "1 if the target manifest is reachable"
-	helpManifestFetch = "Time to fetch the top-level manifest"
-	helpSequence      = "Live-edge sequence (EXT-X-MEDIA-SEQUENCE, or the newest DASH segment number)"
-	helpWindow        = "Length of the live/DVR window in seconds"
-	helpSegmentCount  = "Segments in the current window"
-	helpSegmentUp     = "1 if a sampled segment is fetchable"
-	helpSegmentTTFB   = "Time-to-first-byte for a sampled segment"
-	helpKeyCount      = "Distinct encrypting keys (HLS) or DRM systems (DASH) in force"
-	helpInitUp        = "1 if the initialisation segment is fetchable"
-	helpManifestAge   = "Age header on the manifest response: seconds since the origin generated it"
-	helpCacheHit      = "1 if the manifest response was a CDN cache hit, 0 if a miss"
-	helpChunked       = "1 if a low-latency segment is delivered chunked, 0 if buffered whole"
-	helpStreamLive    = "1 if the stream is live, 0 if it is complete (EXT-X-ENDLIST, or MPD type=static)"
+	helpProbeUp        = "1 if the target manifest is reachable"
+	helpManifestFetch  = "Time to fetch the top-level manifest"
+	helpSequence       = "Live-edge sequence (EXT-X-MEDIA-SEQUENCE, or the newest DASH segment number)"
+	helpWindow         = "Length of the live/DVR window in seconds"
+	helpSegmentCount   = "Segments in the current window"
+	helpSegmentUp      = "1 if a sampled segment is fetchable"
+	helpSegmentTTFB    = "Time-to-first-byte for a sampled segment"
+	helpKeyCount       = "Distinct encrypting keys (HLS) or DRM systems (DASH) in force"
+	helpInitUp         = "1 if the initialisation segment is fetchable"
+	helpManifestAge    = "Age header on the manifest response: seconds since the origin generated it"
+	helpCacheHit       = "1 if the manifest response was a CDN cache hit, 0 if a miss"
+	helpChunked        = "1 if a low-latency segment is delivered chunked, 0 if buffered whole"
+	helpInspectSeconds = "Time ffprobe took to read the media"
+	helpMediaReadable  = "1 if ffprobe could read the media, 0 if not"
+	helpMediaStreams   = "Elementary streams ffprobe found in the media"
+	helpStreamLive     = "1 if the stream is live, 0 if it is complete (EXT-X-ENDLIST, or MPD type=static)"
 )
 
 type Prober struct {
 	client   *http.Client
 	reg      *metrics.Registry
 	notifier alert.Notifier
-	now      func() time.Time // injectable so the cross-poll checks are testable
+	// inspector is nil-safe: a disabled one reports unavailable and every
+	// inspection check is skipped.
+	inspector  *inspect.Inspector
+	inspectFor time.Duration
+	now        func() time.Time // injectable so the cross-poll checks are testable
 
 	mu    sync.Mutex
 	state map[string]*plState   // keyed by media-playlist URL
@@ -67,12 +75,23 @@ type plState struct {
 
 func New(reg *metrics.Registry, n alert.Notifier) *Prober {
 	return &Prober{
-		client:   &http.Client{Timeout: 15 * time.Second},
-		reg:      reg,
-		notifier: n,
-		now:      time.Now,
-		state:    make(map[string]*plState),
-		edges:    make(map[string]*edgeState),
+		client:     &http.Client{Timeout: 15 * time.Second},
+		reg:        reg,
+		notifier:   n,
+		now:        time.Now,
+		state:      make(map[string]*plState),
+		edges:      make(map[string]*edgeState),
+		inspector:  &inspect.Inspector{},
+		inspectFor: 20 * time.Second,
+	}
+}
+
+// SetInspector enables media inspection. Passing a disabled inspector, or
+// never calling this, leaves every other check untouched.
+func (p *Prober) SetInspector(i *inspect.Inspector, timeout time.Duration) {
+	p.inspector = i
+	if timeout > 0 {
+		p.inspectFor = timeout
 	}
 }
 
@@ -153,25 +172,31 @@ func (p *Prober) probeHLS(ctx context.Context, t config.Target, res fetchResult)
 			variants = variants[:t.MaxVariants]
 		}
 		for _, v := range variants {
-			p.probeMedia(ctx, t, resolveURL(t.URL, v.URI), variantLabel(v))
+			p.probeMedia(ctx, t, resolveURL(t.URL, v.URI), variantLabel(v),
+				inspect.Declared{
+					Codecs: v.Codecs, Resolution: v.Resolution,
+					SeparateKinds: separateKinds(v),
+				})
 		}
 
 		// Renditions are declared once at the master level, so they are probed
 		// once per cycle regardless of how many variants reference them.
+		// A rendition declares no CODECS and no RESOLUTION, so there is
+		// nothing to compare its media against.
 		for _, r := range selectRenditions(t, master) {
-			p.probeMedia(ctx, t, resolveURL(t.URL, r.URI), r.Label())
+			p.probeMedia(ctx, t, resolveURL(t.URL, r.URI), r.Label(), inspect.Declared{})
 		}
 	case hls.Media:
 		// The target is itself a media playlist: reuse the body ProbeTarget
 		// already fetched rather than asking the origin for it again.
-		p.checkMedia(ctx, t, t.URL, "direct", res)
+		p.checkMedia(ctx, t, t.URL, "direct", res, inspect.Declared{})
 	default:
 		p.emit(t.Name, "", alert.Warning, "unknown_playlist", "response was not a recognizable HLS playlist or DASH MPD")
 	}
 }
 
-func (p *Prober) probeMedia(ctx context.Context, t config.Target, mediaURL, variant string) {
-	p.checkMedia(ctx, t, mediaURL, variant, p.fetch(ctx, t, mediaURL))
+func (p *Prober) probeMedia(ctx context.Context, t config.Target, mediaURL, variant string, d inspect.Declared) {
+	p.checkMedia(ctx, t, mediaURL, variant, p.fetch(ctx, t, mediaURL), d)
 }
 
 // checkMedia runs the media-playlist path against a response that has already
@@ -183,7 +208,7 @@ func (p *Prober) probeMedia(ctx context.Context, t config.Target, mediaURL, vari
 // against the origin for nothing. The metrics are recorded from that same
 // response, so media_fetch_seconds for such a target now reports the fetch
 // that actually happened rather than a second one made only to measure it.
-func (p *Prober) checkMedia(ctx context.Context, t config.Target, mediaURL, variant string, res fetchResult) {
+func (p *Prober) checkMedia(ctx context.Context, t config.Target, mediaURL, variant string, res fetchResult, d inspect.Declared) {
 	labels := map[string]string{"target": t.Name, "variant": variant}
 
 	p.reg.SetGauge("streampulse_media_fetch_seconds", "Time to fetch a media playlist", res.dur.Seconds(), labels)
@@ -212,6 +237,8 @@ func (p *Prober) checkMedia(ctx context.Context, t config.Target, mediaURL, vari
 		// A playlist has more than one initialisation section when it changes
 		// mid-stream, which happens at a discontinuity; each is fetched once
 		// however many segments reference it.
+		// The initialisation segment describes the tracks, so it is what gets
+		// inspected. A media segment on its own describes nothing.
 		for _, mp := range pl.DistinctMaps() {
 			// A URI-less EXT-X-MAP is reported by runChecks as the spec
 			// violation it is. It must not be probed: resolving an empty
@@ -221,7 +248,16 @@ func (p *Prober) checkMedia(ctx context.Context, t config.Target, mediaURL, vari
 				continue
 			}
 			offset, _ := mp.Offset()
-			p.probeInit(ctx, t, variant, resolveURL(mediaURL, mp.URI), offset)
+			initURL := resolveURL(mediaURL, mp.URI)
+			p.probeInit(ctx, t, variant, initURL, offset)
+			length, _ := mp.Length()
+			p.inspectMedia(ctx, t, variant, initURL, d, pl.Encrypted(), span{offset, length})
+		}
+		if len(pl.Maps) == 0 && len(pl.Segments) > 0 {
+			// Transport stream: no init segment, and a TS segment is
+			// self-describing, so the newest one is what gets inspected.
+			last := pl.Segments[len(pl.Segments)-1]
+			p.inspectMedia(ctx, t, variant, resolveURL(mediaURL, last.URI), d, pl.Encrypted(), span{})
 		}
 		urls := make([]string, len(pl.Segments))
 		for i, s := range pl.Segments {

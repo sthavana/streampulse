@@ -79,6 +79,7 @@ func (p *Prober) probeRepresentation(ctx context.Context, t config.Target, r *da
 
 	if t.SegmentSample > 0 {
 		p.probeInit(ctx, t, variant, r.InitURI(), 0)
+		p.inspectRepresentation(ctx, t, r, variant)
 		p.checkChunkedDelivery(ctx, t, r, variant, segs, now)
 		urls := make([]string, len(segs))
 		for i, s := range segs {
