@@ -1,6 +1,6 @@
 # StreamPulse
 
-[![CI](https://github.com/sthavana/pulsemark/actions/workflows/ci.yml/badge.svg)](https://github.com/sthavana/pulsemark/actions/workflows/ci.yml)
+[![CI](https://github.com/sthavana/streampulse/actions/workflows/ci.yml/badge.svg)](https://github.com/sthavana/streampulse/actions/workflows/ci.yml)
 [![Go](https://img.shields.io/badge/go-1.22%2B-00ADD8)](https://go.dev)
 [![License](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 
