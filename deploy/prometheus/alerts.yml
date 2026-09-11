@@ -1,0 +1,86 @@
+# Alert rules for StreamPulse.
+#
+# A note on `for:`. StreamPulse already damps flapping itself -- findings are
+# deduplicated into incidents, and alerting.for_seconds in config.json decides
+# how long a fault must persist before an incident opens at all. Adding a
+# second `for:` here would mean two places to reason about when something
+# pages, and two places to get it wrong. So these rules mostly fire as soon as
+# the incident does, and the damping stays in one place: the config.
+#
+# The exception is StreamPulseProberDown, which is about this process rather
+# than any stream.
+
+groups:
+  - name: streampulse
+    rules:
+      # --- the prober itself ---
+
+      - alert: StreamPulseProberDown
+        expr: up{job="streampulse"} == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "StreamPulse is not being scraped"
+          description: >-
+            Prometheus cannot reach the prober. No stream is being monitored,
+            and the absence of stream alerts means nothing right now.
+
+      # --- streams ---
+
+      # Every check the prober runs surfaces here: the incident gauge carries
+      # the check name and severity, so one rule per severity covers all of
+      # them, including any added later.
+      - alert: StreamPulseCritical
+        expr: streampulse_incident_active{severity="critical"} == 1
+        labels:
+          severity: critical
+        annotations:
+          summary: "{{ $labels.check }} on {{ $labels.target }} {{ $labels.variant }}"
+          description: >-
+            StreamPulse opened a critical incident: {{ $labels.check }} on
+            target {{ $labels.target }}, variant {{ $labels.variant }}.
+            The finding text with the detail is on the prober's stdout.
+
+      - alert: StreamPulseWarning
+        expr: streampulse_incident_active{severity="warning"} == 1
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $labels.check }} on {{ $labels.target }} {{ $labels.variant }}"
+          description: >-
+            StreamPulse opened a warning incident: {{ $labels.check }} on
+            target {{ $labels.target }}, variant {{ $labels.variant }}.
+
+      # A target unreachable for two minutes, independent of the incident
+      # machinery, so a broken tracker cannot hide an outage.
+      - alert: StreamPulseTargetUnreachable
+        expr: streampulse_probe_up == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Manifest unreachable: {{ $labels.target }}"
+
+      # --- symptoms worth seeing before they become faults ---
+
+      # A CDN edge that stops revalidating serves an ever-older manifest. This
+      # climbs steadily well before anything times out or freezes.
+      - alert: StreamPulseManifestAgeClimbing
+        expr: streampulse_manifest_age_seconds > 60
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Cached manifest is {{ $value | humanizeDuration }} old on {{ $labels.target }}"
+          description: >-
+            The edge has been serving a stale manifest for five minutes. The
+            origin may be healthy behind it.
+
+      - alert: StreamPulseSegmentLatencyHigh
+        expr: streampulse_segment_ttfb_seconds > 2
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Segment TTFB {{ $value | humanizeDuration }} on {{ $labels.target }} {{ $labels.variant }}"

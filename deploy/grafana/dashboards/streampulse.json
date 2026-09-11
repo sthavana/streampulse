@@ -1,0 +1,136 @@
+{
+  "uid": "streampulse",
+  "title": "StreamPulse",
+  "tags": ["streampulse", "streaming"],
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "version": 1,
+  "editable": true,
+  "refresh": "30s",
+  "time": { "from": "now-1h", "to": "now" },
+  "panels": [
+    {
+      "id": 1,
+      "type": "stat",
+      "title": "Targets reachable",
+      "gridPos": { "h": 4, "w": 6, "x": 0, "y": 0 },
+      "datasource": { "type": "prometheus", "uid": "streampulse-prom" },
+      "targets": [
+        { "refId": "A", "expr": "sum(streampulse_probe_up)", "legendFormat": "up" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] }
+    },
+    {
+      "id": 2,
+      "type": "stat",
+      "title": "Incidents firing",
+      "description": "Faults deduplicated into open incidents. Zero is the healthy reading.",
+      "gridPos": { "h": 4, "w": 6, "x": 6, "y": 0 },
+      "datasource": { "type": "prometheus", "uid": "streampulse-prom" },
+      "targets": [
+        { "refId": "A", "expr": "sum(streampulse_incident_active)", "legendFormat": "firing" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] }
+    },
+    {
+      "id": 3,
+      "type": "stat",
+      "title": "Variants / representations probed",
+      "gridPos": { "h": 4, "w": 6, "x": 12, "y": 0 },
+      "datasource": { "type": "prometheus", "uid": "streampulse-prom" },
+      "targets": [
+        { "refId": "A", "expr": "count(streampulse_segment_count)", "legendFormat": "probed" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] }
+    },
+    {
+      "id": 4,
+      "type": "stat",
+      "title": "Maintenance windows open",
+      "gridPos": { "h": 4, "w": 6, "x": 18, "y": 0 },
+      "datasource": { "type": "prometheus", "uid": "streampulse-prom" },
+      "targets": [
+        { "refId": "A", "expr": "sum(streampulse_maintenance_active)", "legendFormat": "open" }
+      ],
+      "fieldConfig": { "defaults": { "unit": "short" }, "overrides": [] }
+    },
+    {
+      "id": 5,
+      "type": "timeseries",
+      "title": "Live edge advancing (segments/min)",
+      "description": "The freeze detector in graph form: a healthy live stream holds a steady rate, and a frozen one drops to zero. VOD sits at zero by design.",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 4 },
+      "datasource": { "type": "prometheus", "uid": "streampulse-prom" },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "rate(streampulse_media_sequence[2m]) * 60",
+          "legendFormat": "{{target}} {{variant}}"
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "short", "min": 0 }, "overrides": [] }
+    },
+    {
+      "id": 6,
+      "type": "timeseries",
+      "title": "Segment time-to-first-byte",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 4 },
+      "datasource": { "type": "prometheus", "uid": "streampulse-prom" },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "streampulse_segment_ttfb_seconds",
+          "legendFormat": "{{target}} {{variant}}"
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "s", "min": 0 }, "overrides": [] }
+    },
+    {
+      "id": 7,
+      "type": "timeseries",
+      "title": "Manifest cache age",
+      "description": "How old the manifest the CDN served is. A steady climb is an edge that has stopped revalidating, and it shows here before anything freezes.",
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 12 },
+      "datasource": { "type": "prometheus", "uid": "streampulse-prom" },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "streampulse_manifest_age_seconds",
+          "legendFormat": "{{target}} {{variant}}"
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "s", "min": 0 }, "overrides": [] }
+    },
+    {
+      "id": 8,
+      "type": "timeseries",
+      "title": "Live / DVR window",
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 12 },
+      "datasource": { "type": "prometheus", "uid": "streampulse-prom" },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "streampulse_playlist_window_seconds",
+          "legendFormat": "{{target}} {{variant}}"
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "s", "min": 0 }, "overrides": [] }
+    },
+    {
+      "id": 9,
+      "type": "timeseries",
+      "title": "Findings by check",
+      "description": "Raw findings, before deduplication into incidents. A check that fires on every poll shows as a flat line here and as one incident on the stat above.",
+      "gridPos": { "h": 8, "w": 24, "x": 0, "y": 20 },
+      "datasource": { "type": "prometheus", "uid": "streampulse-prom" },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum by (check, severity) (rate(streampulse_findings_total[5m]) * 60)",
+          "legendFormat": "{{check}} ({{severity}})"
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "short", "min": 0 }, "overrides": [] }
+    }
+  ]
+}

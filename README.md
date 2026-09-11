@@ -519,7 +519,7 @@ Requires Go 1.22+.
 ```bash
 cp config.example.json config.json   # edit targets
 make check                           # gofmt + vet + tests with -race, what CI runs
-make run
+make run                             # or: make compose-up for the full stack
 # metrics:   curl localhost:9090/metrics
 # findings:  JSON lines on stdout
 ```
@@ -530,6 +530,76 @@ live channel with sparse PDT and ad markers, which exercises the freeze,
 rollback and PDT rules. (Apple's older `bipbop_adv_example_hls` URL is dead
 and now redirects to an HTML page -- StreamPulse flags it as
 `unknown_playlist`, which is the correct result.)
+
+## Running it
+
+### Docker
+
+```bash
+docker build -t streampulse .
+docker run --rm -p 9090:9090 \
+  -v "$PWD/config.json:/etc/streampulse/config.json:ro" \
+  streampulse
+```
+
+The image is a static binary on `scratch` plus a CA bundle -- a few megabytes,
+no shell, no package manager, nothing else in it that can carry a CVE. That is
+a direct dividend of the zero-dependency stance: the timezone database is
+already compiled in (`time/tzdata`), so maintenance windows resolve their
+locations with no system tzdata to install.
+
+It runs as uid 65534 and serves `/healthz` for an orchestrator's probe. There
+is no `HEALTHCHECK` in the image because `scratch` has no shell to run one
+with.
+
+### The whole stack
+
+```bash
+make compose-up     # or: docker compose -f deploy/docker-compose.yml up --build
+```
+
+Brings up the prober, Prometheus and Grafana against public test streams --
+Unified Streaming's live channel in **both** HLS and DASH, which is the same
+content through both code paths side by side, plus Apple's fMP4 VOD.
+
+| | |
+|---|---|
+| Grafana | http://localhost:3000 (anonymous, no login) |
+| Prometheus | http://localhost:9091 |
+| prober metrics | http://localhost:9090/metrics |
+| findings | `docker compose -f deploy/docker-compose.yml logs -f prober` |
+
+Edit `deploy/config.json` for your own streams and
+`docker compose restart prober`.
+
+### Alerting
+
+`deploy/prometheus/alerts.yml` maps the checks to Prometheus alerts. Two rules
+cover every check there is, present and future, because the incident gauge
+carries the check name and severity as labels:
+
+```yaml
+- alert: StreamPulseCritical
+  expr: streampulse_incident_active{severity="critical"} == 1
+```
+
+Those rules deliberately carry almost no `for:`. StreamPulse already damps
+flapping -- findings are deduplicated into incidents, and
+`alerting.for_seconds` decides how long a fault must persist before an incident
+opens at all. A second `for:` in Prometheus would mean two places to reason
+about when something pages, and two places to get it wrong.
+
+The rest of the rules cover what the incident machinery cannot: the prober
+being unscrapeable, and two symptoms worth seeing before they become faults
+(a climbing manifest cache age, and segment TTFB).
+
+### Known rough edge
+
+Metric series are never deleted. Remove a target from the config while one of
+its incidents is firing, and `streampulse_incident_active` for it stays at 1
+until the process restarts -- so the alert stays up with nothing behind it.
+Restarting the prober clears it. Incident state is in memory only, so a restart
+also re-opens anything still broken, which is the other half of the same gap.
 
 ## Architecture
 
@@ -581,6 +651,9 @@ Packages: `hls` and `dash` (manifest parsers), `probe` (prober + checks),
 - **Cross-layer correlation**: map a QoE symptom to the offending layer
   (started: manifest findings already carry an origin-vs-edge verdict)
 - **Web UI** over the incident state the tracker already keeps
+- **Incident state that survives a restart** -- it is in memory today, so a
+  redeploy re-opens every firing incident and pages again for faults everyone
+  already knows about
 
 ## Status
 

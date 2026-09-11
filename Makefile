@@ -1,4 +1,4 @@
-.PHONY: build run test vet fmt check clean
+.PHONY: build run test vet fmt check docker compose-up compose-down clean
 
 build:
 	go build -o bin/prober ./cmd/prober
@@ -22,6 +22,16 @@ check:
 
 fmt:
 	gofmt -w .
+
+docker:
+	docker build -t streampulse:dev .
+
+# The demo stack: prober + Prometheus + Grafana against public test streams.
+compose-up:
+	docker compose -f deploy/docker-compose.yml up --build -d
+
+compose-down:
+	docker compose -f deploy/docker-compose.yml down
 
 clean:
 	rm -rf bin

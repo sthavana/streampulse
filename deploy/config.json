@@ -1,0 +1,40 @@
+{
+  "metrics_addr": ":9090",
+  "slack_webhook": "",
+  "alerting": {
+    "for_seconds": 0,
+    "resolve_after_seconds": 90,
+    "repeat_every_seconds": 0,
+    "sweep_seconds": 10
+  },
+  "targets": [
+    {
+      "name": "unified-live-dash",
+      "url": "https://demo.unified-streaming.com/k8s/live/stable/scte35.isml/.mpd",
+      "type": "dash",
+      "interval_seconds": 8,
+      "max_representations": 1,
+      "segment_sample": 1,
+      "expect_live": true
+    },
+    {
+      "name": "unified-live-hls",
+      "url": "https://demo.unified-streaming.com/k8s/live/stable/scte35.isml/.m3u8",
+      "type": "hls",
+      "interval_seconds": 8,
+      "max_variants": 1,
+      "max_renditions": 1,
+      "segment_sample": 1,
+      "expect_live": true
+    },
+    {
+      "name": "apple-fmp4-vod",
+      "url": "https://devstreaming-cdn.apple.com/videos/streaming/examples/img_bipbop_adv_example_fmp4/master.m3u8",
+      "type": "hls",
+      "interval_seconds": 30,
+      "max_variants": 2,
+      "max_renditions": 1,
+      "segment_sample": 1
+    }
+  ]
+}
