@@ -129,3 +129,34 @@ func (c cacheInfo) explain(unchangedFor time.Duration) string {
 	}
 	return base + " -- fresher than the freeze, so the origin is serving it]"
 }
+
+// attributeLag splits an observed lag between the two things that cause it.
+//
+// A binary verdict is the wrong shape for this one. The manifest was generated
+// Age seconds ago, so of a lag of `behind`, exactly Age is cache and the
+// remainder is how far behind the packager already was when it wrote the
+// manifest. Saying so is both more useful and harder to get wrong than a
+// threshold: a 300s-old manifest against a 306s lag is 98% cache, but a rule
+// comparing the two calls it "fresher than the lag" and points at the packager
+// -- which is exactly what it did, the first time this ran against a stale edge.
+func (c cacheInfo) attributeLag(behind time.Duration) string {
+	if c.Hit == "STALE" && !c.HasAge {
+		return " [cache: STALE -- the edge is serving expired content; the packager may be fine]"
+	}
+	if !c.HasAge {
+		return c.describe()
+	}
+	base := " [cache: Age " + ftoa(c.Age.Seconds()) + "s"
+	if c.Hit != "" {
+		base += ", " + c.Hit
+	}
+	switch own := behind - c.Age; {
+	case c.Age <= 0:
+		return base + " -- fetched fresh, so all of it is the packager]"
+	case own <= 0:
+		return base + " -- cache age alone accounts for all of it; the packager may be fine]"
+	default:
+		return base + " -- the packager was " + ftoa(own.Seconds()) +
+			"s behind when this was generated; the rest is cache age]"
+	}
+}

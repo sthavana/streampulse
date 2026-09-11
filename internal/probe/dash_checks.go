@@ -95,7 +95,8 @@ func (p *Prober) dashEdgeChecks(now time.Time, t config.Target, key, variant str
 		m := r.Period().MPD()
 		if behind := now.Sub(last.CompleteAt); behind > stalenessThreshold(last.Duration, m) {
 			out = append(out, finding(now, t, variant, alert.Warning, "edge_stale",
-				"live edge is "+ftoa(behind.Seconds())+"s behind wall-clock"+declaredLatency(m)))
+				"live edge is "+ftoa(behind.Seconds())+"s behind wall-clock"+declaredLatency(m)+
+					cache.attributeLag(behind)))
 		}
 	}
 

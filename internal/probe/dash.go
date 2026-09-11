@@ -84,7 +84,7 @@ func (p *Prober) probeRepresentation(ctx context.Context, t config.Target, r *da
 		for i, s := range segs {
 			urls[i] = s.URI
 		}
-		p.sampleSegments(ctx, t, variant, urls)
+		p.sampleSegments(ctx, t, variant, urls, cache)
 	}
 }
 

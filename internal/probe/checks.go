@@ -62,7 +62,7 @@ func (p *Prober) runChecks(t config.Target, plURL, variant string, pl *hls.Media
 
 	if live {
 		out = append(out, p.crossPollChecks(now, t, plURL, variant, pl, cache)...)
-		out = append(out, edgeStalenessCheck(now, t, variant, pl)...)
+		out = append(out, edgeStalenessCheck(now, t, variant, pl, cache)...)
 	}
 
 	// --- discontinuity awareness (informational; useful around ad breaks) ---
@@ -147,7 +147,7 @@ func (p *Prober) crossPollChecks(now time.Time, t config.Target, plURL, variant 
 // edgeStalenessCheck compares the projected live edge against the local clock.
 // Heuristic: it requires an accurate local clock (NTP) and is intentionally
 // conservative to avoid false positives on high-latency / large-DVR configs.
-func edgeStalenessCheck(now time.Time, t config.Target, variant string, pl *hls.MediaPlaylist) []alert.Finding {
+func edgeStalenessCheck(now time.Time, t config.Target, variant string, pl *hls.MediaPlaylist, cache cacheInfo) []alert.Finding {
 	if pl.TargetDuration == 0 {
 		return nil
 	}
@@ -157,8 +157,10 @@ func edgeStalenessCheck(now time.Time, t config.Target, variant string, pl *hls.
 	}
 	behind := now.Sub(*edge).Seconds()
 	if behind > float64(pl.TargetDuration)*3 {
+		lag := time.Duration(behind * float64(time.Second))
 		return []alert.Finding{finding(now, t, variant, alert.Warning, "pdt_stale",
-			"live-edge PROGRAM-DATE-TIME is "+ftoa(behind)+"s behind wall-clock")}
+			"live-edge PROGRAM-DATE-TIME is "+ftoa(behind)+"s behind wall-clock"+
+				cache.attributeLag(lag))}
 	}
 	return nil
 }

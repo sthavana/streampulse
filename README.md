@@ -380,6 +380,26 @@ playlist_stalled  timeline has not advanced for 44.0s (live edge frozen)
                   [cache: Age 120.0s, HIT -- old enough to account for the freeze; check the origin before the packager]
 ```
 
+Four checks carry it: `playlist_stalled`, `playlist_rollback`, `pdt_stale` /
+`edge_stale`, and `segment_availability` -- the last because a segment that
+404s while we are acting on a minutes-old cached manifest, which names segments
+that have since aged out, is a different fault from one the origin never
+produced.
+
+A lag is **split** rather than judged. The manifest was generated `Age` seconds
+ago, so of an observed lag, exactly `Age` is cache and the remainder is how far
+behind the packager already was when it wrote the manifest:
+
+```
+pdt_stale  live-edge PROGRAM-DATE-TIME is 418.6s behind wall-clock
+           [cache: Age 300.0s, HIT -- the packager was 118.6s behind when this
+            was generated; the rest is cache age]
+```
+
+That split replaced a threshold, and the threshold was wrong: 300s of cache
+against a 306s lag is 98% cache, and comparing the two called it "fresher than
+the lag" and pointed at the packager.
+
 The reasoning is only as strong as the `Age` header, and is worded as evidence
 rather than a verdict. If the response we just read is *younger* than the
 freeze, the origin generated this frozen manifest moments ago and the packager

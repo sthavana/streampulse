@@ -221,3 +221,79 @@ func TestStreamLivenessIsExported(t *testing.T) {
 		}
 	}
 }
+
+// pdt_stale asks the same question a freeze does -- packager, or a stale copy
+// of its manifest -- so it gets the same answer. This came from a real
+// incident: a four-minute-behind live edge during a network blip, with no way
+// to tell whether the packager had fallen behind or the edge had served an old
+// manifest, when the Age header had already been read and thrown away.
+func TestPDTStaleNamesTheLayer(t *testing.T) {
+	// PDT four minutes behind the clock, on a 4s-target playlist.
+	anchor := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	pl := livePlaylist(100, 4, 2, 4.0, &anchor)
+	now := anchor.Add(8*time.Second + 260*time.Second)
+
+	// A 300s-old manifest against a 260s lag: the cache covers all of it.
+	stale := edgeStalenessCheck(now, target, "v", pl,
+		cacheInfo{Age: 300 * time.Second, HasAge: true, Hit: "HIT"})
+	if len(stale) != 1 {
+		t.Fatalf("expected pdt_stale, got %v", checks(stale))
+	}
+	if !strings.Contains(stale[0].Message, "accounts for all of it") {
+		t.Errorf("a 300s-old manifest covers a 260s lag, got %q", stale[0].Message)
+	}
+
+	// The case a threshold got wrong: nearly all cache, a little packager.
+	mostly := edgeStalenessCheck(now, target, "v", pl,
+		cacheInfo{Age: 254 * time.Second, HasAge: true, Hit: "HIT"})
+	if !strings.Contains(mostly[0].Message, "the packager was 6.0s behind") {
+		t.Errorf("the lag should be split, not thresholded, got %q", mostly[0].Message)
+	}
+
+	fresh := edgeStalenessCheck(now, target, "v", pl,
+		cacheInfo{Age: 0, HasAge: true, Hit: "MISS"})
+	if !strings.Contains(fresh[0].Message, "all of it is the packager") {
+		t.Errorf("a fresh manifest points at the origin, got %q", fresh[0].Message)
+	}
+
+	// No cache headers, no claim.
+	quiet := edgeStalenessCheck(now, target, "v", pl, cacheInfo{})
+	if strings.Contains(quiet[0].Message, "cache") {
+		t.Errorf("nothing said should mean nothing claimed, got %q", quiet[0].Message)
+	}
+}
+
+// A segment that 404s because we are acting on a minutes-old cached manifest
+// -- naming segments that have since aged out of the window -- is a different
+// fault from one the origin never produced.
+func TestSegmentAvailabilityCarriesTheManifestAge(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, ".m3u8") {
+			w.Header().Set("Age", "300")
+			w.Header().Set("X-Cache", "Hit from cloudfront")
+			_, _ = w.Write([]byte("#EXTM3U\n#EXT-X-TARGETDURATION:4\n#EXTINF:4.0,\ngone.ts\n"))
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer srv.Close()
+
+	cap := &capture{}
+	pr := New(metrics.New(), cap)
+	pr.ProbeTarget(context.Background(), config.Target{
+		Name: "t", URL: srv.URL + "/media.m3u8", SegmentSample: 1,
+	})
+
+	var msg string
+	for _, f := range cap.findings {
+		if f.Check == "segment_availability" {
+			msg = f.Message
+		}
+	}
+	if msg == "" {
+		t.Fatalf("expected segment_availability, got %+v", cap.findings)
+	}
+	if !strings.Contains(msg, "Age 300.0s") || !strings.Contains(msg, "HIT") {
+		t.Errorf("finding should carry the manifest's cache state, got %q", msg)
+	}
+}

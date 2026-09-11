@@ -88,7 +88,7 @@ func TestPDTStaleNotFiredAtHealthyLiveEdge(t *testing.T) {
 	// Wall clock sits exactly at the projected live edge: nothing is stale.
 	now := anchor.Add(36 * time.Second)
 
-	if fs := edgeStalenessCheck(now, target, "v", pl); len(fs) != 0 {
+	if fs := edgeStalenessCheck(now, target, "v", pl, cacheInfo{}); len(fs) != 0 {
 		t.Errorf("expected no findings at a healthy edge, got %v", checks(fs))
 	}
 }
@@ -99,7 +99,7 @@ func TestPDTStaleFiresWhenEdgeGenuinelyBehind(t *testing.T) {
 	// A full minute past the edge, well beyond 3 x TARGETDURATION.
 	now := anchor.Add(36*time.Second + 60*time.Second)
 
-	fs := edgeStalenessCheck(now, target, "v", pl)
+	fs := edgeStalenessCheck(now, target, "v", pl, cacheInfo{})
 	if !hasCheck(fs, "pdt_stale") {
 		t.Fatalf("expected pdt_stale, got %v", checks(fs))
 	}

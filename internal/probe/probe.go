@@ -227,14 +227,18 @@ func (p *Prober) checkMedia(ctx context.Context, t config.Target, mediaURL, vari
 		for i, s := range pl.Segments {
 			urls[i] = resolveURL(mediaURL, s.URI)
 		}
-		p.sampleSegments(ctx, t, variant, urls)
+		p.sampleSegments(ctx, t, variant, urls, res.cache)
 	}
 }
 
 // sampleSegments fetch-checks the most recent N of the given segment URLs (the
 // live edge, where availability problems usually first appear). It takes
 // resolved URLs rather than a playlist so that both manifest formats share it.
-func (p *Prober) sampleSegments(ctx context.Context, t config.Target, variant string, urls []string) {
+// cache is the manifest's, not the segment's, and that is the useful one: a
+// segment that 404s because we are acting on a minutes-old cached manifest
+// naming segments that have since aged out is a different fault from one the
+// origin never produced, and the Age header is what tells them apart.
+func (p *Prober) sampleSegments(ctx context.Context, t config.Target, variant string, urls []string, cache cacheInfo) {
 	labels := map[string]string{"target": t.Name, "variant": variant}
 	n := t.SegmentSample
 	if n > len(urls) {
@@ -248,7 +252,8 @@ func (p *Prober) sampleSegments(ctx context.Context, t config.Target, variant st
 			if err != nil {
 				detail = err.Error()
 			}
-			p.emit(t.Name, variant, alert.Critical, "segment_availability", "segment not available ("+detail+"): "+u)
+			p.emit(t.Name, variant, alert.Critical, "segment_availability",
+				"segment not available ("+detail+"): "+u+cache.describe())
 			return
 		}
 		p.reg.SetGauge("streampulse_segment_available", helpSegmentUp, 1, labels)
