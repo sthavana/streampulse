@@ -65,6 +65,11 @@ type Alerting struct {
 	RepeatEverySeconds int `json:"repeat_every_seconds"`
 	// SweepSeconds is how often expired incidents are checked. Defaults to 10.
 	SweepSeconds int `json:"sweep_seconds"`
+	// StateFile persists open incidents across a restart, so a redeploy does
+	// not re-announce faults everyone has already been told about. Empty
+	// disables it, which is the default: it needs somewhere writable to live,
+	// and that is a deployment decision rather than something to guess at.
+	StateFile string `json:"state_file,omitempty"`
 }
 
 func (a Alerting) For() time.Duration    { return time.Duration(a.ForSeconds) * time.Second }

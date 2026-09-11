@@ -436,6 +436,31 @@ URI each poll still collapses to one incident.
 }
 ```
 
+```json
+"alerting": { "state_file": "/var/lib/streampulse/state.json" }
+```
+
+`state_file` carries open incidents across a restart. Without it a redeploy
+re-announces every firing fault, paging about things everyone was already told
+about -- the exact fatigue the deduplication exists to prevent. It is opt-in
+because it needs somewhere writable to live, and that is a deployment decision
+rather than something to guess at.
+
+What is restored is the incident's history and the fact that it was already
+announced, not its last-seen time. That is deliberate: the tracker's model is
+"presumed firing until `resolve_after_seconds` passes with no observation", and
+after a restart there have been no observations. Restoring the old timestamp
+would make the first sweep resolve everything instantly -- announcing a
+clearing for faults that are probably still live, then re-opening them a poll
+later. Each restored incident gets a full grace period instead. Still broken,
+and the next poll refreshes it in silence; fixed while the process was down,
+and it resolves properly, once.
+
+A snapshot older than an hour is ignored: the point is surviving a restart, and
+beyond that the world has moved on. A corrupt or unreadable one is logged and
+stepped over, because monitoring that refuses to start over its own scratch
+file is worse than monitoring with no memory.
+
 `for_seconds` is the flap damper: raise it and a transient CDN 404 that clears
 on the next poll is never announced at all. It trades that much detection
 latency for silence, so it is 0 by default.
@@ -607,8 +632,7 @@ check name and target as labels.
 Metric series are never deleted. Remove a target from the config while one of
 its incidents is firing, and `streampulse_incident_active` for it stays at 1
 until the process restarts -- so the alert stays up with nothing behind it.
-Restarting the prober clears it. Incident state is in memory only, so a restart
-also re-opens anything still broken, which is the other half of the same gap.
+Restarting the prober clears it.
 
 ## Architecture
 
@@ -660,9 +684,6 @@ Packages: `hls` and `dash` (manifest parsers), `probe` (prober + checks),
 - **Cross-layer correlation**: map a QoE symptom to the offending layer
   (started: manifest findings already carry an origin-vs-edge verdict)
 - **Web UI** over the incident state the tracker already keeps
-- **Incident state that survives a restart** -- it is in memory today, so a
-  redeploy re-opens every firing incident and pages again for faults everyone
-  already knows about
 
 ## Status
 

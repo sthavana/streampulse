@@ -5,14 +5,24 @@
     "for_seconds": 0,
     "resolve_after_seconds": 90,
     "repeat_every_seconds": 0,
-    "sweep_seconds": 10
+    "sweep_seconds": 10,
+    "state_file": "/var/lib/streampulse/state.json"
   },
   "maintenance": [
     {
       "name": "nightly encoder restart",
-      "targets": ["example-live-channel"],
+      "targets": [
+        "example-live-channel"
+      ],
       "timezone": "America/Los_Angeles",
-      "daily": { "start": "02:00", "end": "04:00", "days": ["Sat", "Sun"] }
+      "daily": {
+        "start": "02:00",
+        "end": "04:00",
+        "days": [
+          "Sat",
+          "Sun"
+        ]
+      }
     },
     {
       "name": "packager upgrade",
@@ -36,7 +46,10 @@
       "type": "dash",
       "interval_seconds": 8,
       "max_representations": 1,
-      "representation_types": ["video", "audio"],
+      "representation_types": [
+        "video",
+        "audio"
+      ],
       "segment_sample": 2
     },
     {
@@ -45,7 +58,9 @@
       "type": "dash",
       "interval_seconds": 8,
       "no_cache": true,
-      "headers": { "X-Probe": "streampulse" },
+      "headers": {
+        "X-Probe": "streampulse"
+      },
       "segment_sample": 1
     },
     {
@@ -54,7 +69,9 @@
       "interval_seconds": 6,
       "max_variants": 0,
       "max_renditions": 0,
-      "rendition_types": ["AUDIO"],
+      "rendition_types": [
+        "AUDIO"
+      ],
       "segment_sample": 2,
       "expect_live": true,
       "min_window_seconds": 30,

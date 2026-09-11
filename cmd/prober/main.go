@@ -51,6 +51,21 @@ func main() {
 		RepeatEvery:  cfg.Alerting.Repeat(),
 	}, notifier, reg)
 
+	if cfg.Alerting.StateFile != "" {
+		tracker.SetStateFile(cfg.Alerting.StateFile)
+		// A state file that cannot be read is logged and stepped over. Refusing
+		// to start because the scratch file is corrupt would turn a cosmetic
+		// problem into an outage of the monitoring itself.
+		switch n, err := tracker.LoadState(); {
+		case err != nil:
+			log.Printf("incident state: %v; starting with none", err)
+		case n > 0:
+			log.Printf("incident state: restored %d open incident(s) from %s", n, cfg.Alerting.StateFile)
+		default:
+			log.Printf("incident state: %s (none to restore)", cfg.Alerting.StateFile)
+		}
+	}
+
 	schedule, err := cfg.Schedule()
 	if err != nil {
 		log.Fatalf("maintenance: %v", err)
@@ -101,6 +116,14 @@ func main() {
 	defer sc()
 	_ = srv.Shutdown(shutdownCtx)
 	wg.Wait()
+
+	// Last thing, after the probers have stopped, so the snapshot reflects the
+	// final state rather than one taken mid-cycle.
+	if cfg.Alerting.StateFile != "" {
+		if err := tracker.SaveState(); err != nil {
+			log.Printf("incident state: could not save: %v", err)
+		}
+	}
 }
 
 // scopeOrAll renders an empty scope as the wildcard it actually is.

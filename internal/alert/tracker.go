@@ -1,6 +1,7 @@
 package alert
 
 import (
+	"log"
 	"strconv"
 	"sync"
 	"time"
@@ -71,6 +72,12 @@ type Tracker struct {
 	cfg      TrackerConfig
 	schedule Schedule
 	now      func() time.Time
+
+	// statePath, when set, is where open incidents are persisted so a restart
+	// does not re-announce faults a human has already been told about.
+	statePath   string
+	lastSaved   string
+	lastSaveErr string
 }
 
 // SetSchedule installs the maintenance windows during which alerting is
@@ -110,6 +117,25 @@ func (t *Tracker) Notify(f Finding) {
 func (t *Tracker) Sweep() {
 	t.publish(t.expire()...)
 	t.refreshWindowGauges()
+	t.mu.Lock()
+	err := t.saveLocked()
+	t.mu.Unlock()
+	if err != nil {
+		t.saveErr(err)
+	}
+}
+
+// saveErr reports a failed snapshot once per distinct message. A state file
+// that cannot be written is worth knowing about, but not worth a line every
+// sweep interval for the life of the process.
+func (t *Tracker) saveErr(err error) {
+	t.mu.Lock()
+	repeat := err.Error() == t.lastSaveErr
+	t.lastSaveErr = err.Error()
+	t.mu.Unlock()
+	if !repeat {
+		log.Printf("alert: could not write incident state: %v", err)
+	}
 }
 
 // refreshWindowGauges publishes which maintenance windows are open right now.
@@ -158,12 +184,19 @@ func (t *Tracker) Tracking() int {
 	return n
 }
 
+// incidentKey is the identity of an incident: one target, one variant, one
+// check. The message is deliberately excluded -- segment_availability names a
+// different segment URI every poll.
+func incidentKey(f Finding) string {
+	return f.Target + "\x00" + f.Variant + "\x00" + f.Check
+}
+
 func (t *Tracker) observe(f Finding) []Finding {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 
 	now := t.now()
-	key := f.Target + "\x00" + f.Variant + "\x00" + f.Check
+	key := incidentKey(f)
 
 	inc := t.incidents[key]
 	if inc == nil {
@@ -285,4 +318,16 @@ func (t *Tracker) publish(fs ...Finding) {
 			t.out.Notify(f)
 		}
 	}
+}
+
+// setIncidentGauge publishes the firing state of one incident.
+func (t *Tracker) setIncidentGauge(f Finding, v float64) {
+	if t.mx == nil {
+		return
+	}
+	t.mx.SetGauge("streampulse_incident_active",
+		"1 while an incident is firing, 0 once it has cleared", v, map[string]string{
+			"target": f.Target, "variant": f.Variant,
+			"check": f.Check, "severity": string(f.Severity),
+		})
 }
