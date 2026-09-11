@@ -507,6 +507,7 @@ matches is worse than one that refuses to load.
 `streampulse_findings_total`,
 `streampulse_key_count`, `streampulse_key_available`,
 `streampulse_init_segment_available`, `streampulse_chunked_delivery`,
+`streampulse_stream_live`,
 `streampulse_key_fetch_seconds`,
 `streampulse_incident_active`, `streampulse_incidents_opened_total`,
 `streampulse_incidents_resolved_total`, `streampulse_maintenance_active`,
@@ -592,6 +593,14 @@ about when something pages, and two places to get it wrong.
 The rest of the rules cover what the incident machinery cannot: the prober
 being unscrapeable, and two symptoms worth seeing before they become faults
 (a climbing manifest cache age, and segment TTFB).
+
+### Verified
+
+The stack in `deploy/` has been run end to end: the image builds (9.3MB),
+probes real streams over HTTPS from `scratch`, Prometheus scrapes it, all six
+alert rules load, Grafana provisions its datasource and dashboard, and a
+deliberately broken target produces a firing `StreamPulseCritical` carrying the
+check name and target as labels.
 
 ### Known rough edge
 

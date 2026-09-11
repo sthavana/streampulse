@@ -53,6 +53,8 @@ func (p *Prober) probeRepresentation(ctx context.Context, t config.Target, r *da
 	variant := r.Label()
 	labels := map[string]string{"target": t.Name, "variant": variant}
 
+	p.reg.SetGauge("streampulse_stream_live", helpStreamLive, boolGauge(r.Period().MPD().Dynamic()), labels)
+
 	segs := r.SegmentsAt(now)
 	p.reg.SetGauge("streampulse_segment_count", helpSegmentCount, float64(len(segs)), labels)
 	if len(segs) == 0 {

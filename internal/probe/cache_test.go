@@ -193,3 +193,31 @@ func scrape(t *testing.T, reg *metrics.Registry) string {
 	reg.Handler().ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/metrics", nil))
 	return rec.Body.String()
 }
+
+// Liveness is exported because a cache-age alert cannot be written without
+// it: a VOD manifest is *supposed* to sit in a CDN for hours, and a rule that
+// cannot tell it from a live one pages about healthy streams.
+func TestStreamLivenessIsExported(t *testing.T) {
+	cases := []struct {
+		name string
+		body string
+		want string
+	}{
+		{"hls live", "#EXTM3U\n#EXT-X-TARGETDURATION:4\n#EXTINF:4.0,\nseg0.ts\n", "1"},
+		{"hls complete", "#EXTM3U\n#EXT-X-TARGETDURATION:4\n#EXTINF:4.0,\nseg0.ts\n#EXT-X-ENDLIST\n", "0"},
+	}
+	for _, c := range cases {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			_, _ = w.Write([]byte(c.body))
+		}))
+		reg := metrics.New()
+		pr := New(reg, &capture{})
+		pr.ProbeTarget(context.Background(), config.Target{Name: "t", URL: srv.URL + "/media.m3u8"})
+		srv.Close()
+
+		want := `streampulse_stream_live{target="t",variant="direct"} ` + c.want
+		if body := scrape(t, reg); !strings.Contains(body, want) {
+			t.Errorf("%s: metrics missing %q", c.name, want)
+		}
+	}
+}

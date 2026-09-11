@@ -1,0 +1,2 @@
+# Grafana logs an error for each provisioning directory it cannot find.
+# These stay empty so a first run is not noisy with errors that are not.

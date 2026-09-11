@@ -66,8 +66,15 @@ groups:
 
       # A CDN edge that stops revalidating serves an ever-older manifest. This
       # climbs steadily well before anything times out or freezes.
+      #
+      # Restricted to live streams, and that restriction is the whole rule: a
+      # VOD manifest never changes, so a CDN is *supposed* to hold it for
+      # hours. Without the liveness join this fires on every healthy VOD
+      # target -- which it did, on Apple's, the first time this stack was run.
       - alert: StreamPulseManifestAgeClimbing
-        expr: streampulse_manifest_age_seconds > 60
+        expr: |
+          streampulse_manifest_age_seconds > 60
+          and on (target) (max by (target) (streampulse_stream_live) == 1)
         for: 5m
         labels:
           severity: warning

@@ -36,6 +36,7 @@ const (
 	helpManifestAge   = "Age header on the manifest response: seconds since the origin generated it"
 	helpCacheHit      = "1 if the manifest response was a CDN cache hit, 0 if a miss"
 	helpChunked       = "1 if a low-latency segment is delivered chunked, 0 if buffered whole"
+	helpStreamLive    = "1 if the stream is live, 0 if it is complete (EXT-X-ENDLIST, or MPD type=static)"
 )
 
 type Prober struct {
@@ -195,6 +196,7 @@ func (p *Prober) checkMedia(ctx context.Context, t config.Target, mediaURL, vari
 	p.recordCache(labels, res.cache)
 
 	pl := hls.ParseMedia(res.body)
+	p.reg.SetGauge("streampulse_stream_live", helpStreamLive, boolGauge(!pl.EndList), labels)
 	p.reg.SetGauge("streampulse_media_sequence", helpSequence, float64(pl.MediaSequence), labels)
 	p.reg.SetGauge("streampulse_playlist_window_seconds", helpWindow, pl.Duration(), labels)
 	p.reg.SetGauge("streampulse_segment_count", helpSegmentCount, float64(len(pl.Segments)), labels)
@@ -410,6 +412,14 @@ func (p *Prober) emit(target, variant string, sev alert.Severity, check, msg str
 }
 
 // --- small utilities ---
+
+// boolGauge renders a condition as a Prometheus gauge.
+func boolGauge(b bool) float64 {
+	if b {
+		return 1
+	}
+	return 0
+}
 
 func resolveURL(base, ref string) string {
 	b, err := url.Parse(base)
