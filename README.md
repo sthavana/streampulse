@@ -62,7 +62,24 @@ make compose-up      # make compose-down to stop it
 
 The compose stack builds the small `scratch` image, so it has no ffprobe and
 therefore no [media inspection or thumbnails](#looking-inside-the-media-optional).
-Those need `make docker-full` and the config flags in that section.
+For those:
+
+```bash
+make compose-up-full     # same stack, on the image that has ffprobe and ffmpeg
+```
+
+Both run off the same `deploy/config.json`, which asks for ffprobe either way.
+On the small image it is simply absent, the prober says so at startup and
+carries on:
+
+```
+media inspection disabled: ffprobe not found on $PATH
+frame capture disabled: ffmpeg not found on $PATH
+```
+
+Three targets up, six streams, every other check running, no pictures. That is
+the optional dependency working as intended, and running both stacks off one
+config is the cheapest way to see it.
 
 Working on it:
 

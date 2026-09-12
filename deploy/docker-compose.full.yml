@@ -1,0 +1,21 @@
+# Overlay that swaps the prober for the image with ffprobe and ffmpeg, so the
+# demo stack also shows pictures and audio levels.
+#
+#   docker compose -f docker-compose.yml -f docker-compose.full.yml up --build
+#   (or: make compose-up-full)
+#
+# It is an overlay rather than the default because the two images are 9MB and
+# 773MB. Most people running the demo want to see the checks work, not to
+# download three quarters of a gigabyte of ffmpeg to look at thumbnails.
+#
+# config.json needs no variant: it asks for ffprobe and ffmpeg either way, and
+# on the small image they are simply absent, which the prober reports at
+# startup and then carries on without. That is the whole point of the
+# dependency being optional, and running both stacks off one config is the
+# cheapest possible demonstration of it.
+
+services:
+  prober:
+    build:
+      context: ..
+      dockerfile: Dockerfile.full

@@ -15,7 +15,9 @@
       "interval_seconds": 8,
       "max_representations": 1,
       "segment_sample": 1,
-      "expect_live": true
+      "expect_live": true,
+      "inspect": true,
+      "thumbnails": true
     },
     {
       "name": "unified-live-hls",
@@ -25,7 +27,9 @@
       "max_variants": 1,
       "max_renditions": 1,
       "segment_sample": 1,
-      "expect_live": true
+      "expect_live": true,
+      "inspect": true,
+      "thumbnails": true
     },
     {
       "name": "apple-fmp4-vod",
@@ -34,7 +38,14 @@
       "interval_seconds": 30,
       "max_variants": 2,
       "max_renditions": 1,
-      "segment_sample": 1
+      "segment_sample": 1,
+      "inspect": true,
+      "thumbnails": true
     }
-  ]
+  ],
+  "inspection": {
+    "ffprobe": "auto",
+    "ffmpeg": "auto",
+    "timeout_seconds": 25
+  }
 }

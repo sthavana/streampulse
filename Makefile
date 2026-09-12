@@ -1,4 +1,4 @@
-.PHONY: build run test vet fmt check check-linux docker docker-full compose-up compose-down clean
+.PHONY: build run test vet fmt check check-linux docker docker-full compose-up compose-up-full compose-down clean
 
 build:
 	go build -o bin/prober ./cmd/prober
@@ -40,8 +40,13 @@ docker-full:
 compose-up:
 	docker compose -f deploy/docker-compose.yml up --build -d
 
+# The same stack on the image that has ffprobe and ffmpeg, so the UI also
+# shows a picture and an audio level per stream.
+compose-up-full:
+	docker compose -f deploy/docker-compose.yml -f deploy/docker-compose.full.yml up --build -d
+
 compose-down:
-	docker compose -f deploy/docker-compose.yml down
+	docker compose -f deploy/docker-compose.yml -f deploy/docker-compose.full.yml down
 
 clean:
 	rm -rf bin
