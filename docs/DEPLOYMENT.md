@@ -390,9 +390,6 @@ Stated plainly, because you are deciding whether to depend on this.
 - **Not run at scale by anyone.** It has been validated continuously against
   live streams from Unified Streaming, Apple and Akamai, but the largest
   deployment to date is a handful of targets.
-- **Metric series are never deleted.** Remove a target while one of its
-  incidents is firing and `streampulse_incident_active` stays at 1 until the
-  process restarts, leaving an alert up with nothing behind it.
 - **One prober, one process.** There is no clustering and no work sharing.
   Scaling means more probers with different `vantage` values.
 - **`frozen_video` is off by default** because nothing inside a segment

@@ -1076,12 +1076,18 @@ load, Grafana provisions its datasource and dashboard, and a deliberately broken
 target produces a firing `StreamPulseCritical` carrying the check name and
 target as labels.
 
-### Known rough edge
+### Removing a target
 
-Metric series are never deleted. Remove a target from the config while one of
-its incidents is firing, and `streampulse_incident_active` for it stays at 1
-until the process restarts -- so the alert stays up with nothing behind it.
-Restarting the prober clears it.
+A target removed from the config stops being reported on, rather than leaving
+its last reading standing. Its open incidents are resolved immediately -- with
+a message saying it was removed, not that the fault got better -- and every
+metric series carrying its name is dropped.
+
+That matters because of one series in particular. `streampulse_probe_up` frozen
+at 0 for a stream nobody is watching any more is indistinguishable from an
+outage, and `StreamPulseTargetUnreachable` in the shipped rules would have
+fired on it indefinitely. A series that is simply absent is how Prometheus is
+told there is nothing to say.
 
 ## Architecture
 

@@ -155,6 +155,15 @@ func main() {
 				}
 				if ch := sup.Sync(ctx, next.Targets); !ch.Empty() {
 					log.Printf("config reloaded: %s", ch)
+					// A target that is no longer watched must stop being
+					// reported on: its last reading would otherwise stand
+					// forever, and probe_up frozen at 0 reads as an outage.
+					for _, name := range ch.Removed {
+						tracker.Forget(name)
+						if n := reg.DropLabel("target", name); n > 0 {
+							log.Printf("dropped %d metric series for %q", n, name)
+						}
+					}
 				}
 				schedule, err := next.Schedule()
 				if err != nil {

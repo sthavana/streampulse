@@ -131,6 +131,32 @@ func (r *Registry) Snapshot() []Sample {
 	return out
 }
 
+// DropLabel removes every series carrying label=value, and reports how many
+// went.
+//
+// A prober that stops watching a target must stop reporting on it too.
+// Otherwise its last reading stands forever: probe_up frozen at 0 for a stream
+// nobody asked about any more, which the shipped alert rules quite reasonably
+// treat as an outage. A series that is simply absent is how Prometheus is told
+// there is nothing to say.
+func (r *Registry) DropLabel(label, value string) int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	dropped := 0
+	for key, s := range r.meta {
+		if s.Labels[label] != value {
+			continue
+		}
+		delete(r.meta, key)
+		delete(r.vals, key)
+		dropped++
+	}
+	// r.order and the help text are left alone: they are per metric name, not
+	// per series, and the name will be used again by the next target.
+	return dropped
+}
+
 // Handler serves the Prometheus text exposition format.
 func (r *Registry) Handler() http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {

@@ -70,3 +70,62 @@ func TestSnapshotCarriesConstantLabels(t *testing.T) {
 		t.Errorf("snapshot = %+v", s)
 	}
 }
+
+// A prober that stops watching a target must stop reporting on it. Its last
+// reading would otherwise stand forever, and probe_up frozen at 0 is what the
+// shipped alert rules call an outage.
+func TestDropLabelRemovesEverySeriesForATarget(t *testing.T) {
+	r := New()
+	for _, target := range []string{"keep", "drop"} {
+		r.SetGauge("streampulse_probe_up", "h", 1, map[string]string{"target": target})
+		r.SetGauge("streampulse_segment_count", "h", 300,
+			map[string]string{"target": target, "variant": "v0"})
+		r.IncCounter("streampulse_findings_total", "h",
+			map[string]string{"target": target, "check": "x", "severity": "critical"})
+	}
+
+	if n := r.DropLabel("target", "drop"); n != 3 {
+		t.Errorf("dropped %d series, want 3", n)
+	}
+	body := scrape(t, r)
+	if strings.Contains(body, `target="drop"`) {
+		t.Errorf("the removed target is still reported:\n%s", body)
+	}
+	// Counters and gauges alike, across every metric name it appeared under.
+	for _, want := range []string{
+		`streampulse_probe_up{target="keep"} 1`,
+		`streampulse_segment_count{target="keep",variant="v0"} 300`,
+		`streampulse_findings_total{check="x",severity="critical",target="keep"} 1`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("dropping one target disturbed another, missing %q", want)
+		}
+	}
+}
+
+func TestDropLabelIsSafeWhenNothingMatches(t *testing.T) {
+	r := New()
+	r.SetGauge("m", "h", 1, map[string]string{"target": "a"})
+	if n := r.DropLabel("target", "nobody"); n != 0 {
+		t.Errorf("dropped %d series for a target that was never there", n)
+	}
+	if !strings.Contains(scrape(t, r), `m{target="a"} 1`) {
+		t.Error("an unmatched drop removed something")
+	}
+}
+
+// The metric name stays registered, because the next target will use it.
+func TestDroppedNameCanBeUsedAgain(t *testing.T) {
+	r := New()
+	r.SetGauge("streampulse_probe_up", "help text", 1, map[string]string{"target": "a"})
+	r.DropLabel("target", "a")
+	r.SetGauge("streampulse_probe_up", "help text", 1, map[string]string{"target": "b"})
+
+	body := scrape(t, r)
+	if !strings.Contains(body, "# HELP streampulse_probe_up help text") {
+		t.Errorf("the help text was lost with the series:\n%s", body)
+	}
+	if !strings.Contains(body, `streampulse_probe_up{target="b"} 1`) {
+		t.Errorf("the name could not be reused:\n%s", body)
+	}
+}

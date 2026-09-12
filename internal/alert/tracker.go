@@ -207,6 +207,38 @@ type Incident struct {
 	Announced bool `json:"announced"`
 }
 
+// Forget closes out a target that is no longer being watched, and reports how
+// many incidents it had open.
+//
+// Any that were announced are resolved immediately rather than left to expire.
+// Someone was told about them; they should be told it is over, and told now
+// rather than in however long resolve_after happens to be. The message says
+// the target was removed instead of implying the fault got better, because it
+// may not have.
+func (t *Tracker) Forget(target string) int {
+	t.mu.Lock()
+	now := t.now()
+	var out []Finding
+	n := 0
+	for key, inc := range t.incidents {
+		if inc.last.Target != target {
+			continue
+		}
+		n++
+		if inc.announced {
+			f := render(inc, Resolved, now)
+			f.Message = "target removed from the configuration after " +
+				strconv.Itoa(inc.count) + " observation(s); it is no longer being watched"
+			out = append(out, f)
+		}
+		delete(t.incidents, key)
+	}
+	t.mu.Unlock()
+
+	t.publish(out...)
+	return n
+}
+
 // Incidents lists what is open right now, worst first.
 func (t *Tracker) Incidents() []Incident {
 	t.mu.Lock()

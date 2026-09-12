@@ -591,3 +591,64 @@ func TestNoVantageBehavesAsBefore(t *testing.T) {
 		t.Errorf("an unset vantage should stay unset, got %q", out.at(0).Vantage)
 	}
 }
+
+// Removing a target must close out its incidents rather than leave them to
+// expire. Someone was told about the fault; they should be told it is over,
+// and told now.
+func TestForgetResolvesOpenIncidents(t *testing.T) {
+	out := &sink{}
+	tr := NewTracker(TrackerConfig{ResolveAfter: time.Hour}, out, nil)
+
+	tr.Notify(Finding{Target: "gone", Check: "manifest_fetch", Severity: Critical, Message: "refused"})
+	tr.Notify(Finding{Target: "stays", Check: "manifest_fetch", Severity: Critical, Message: "refused"})
+	if out.len() != 2 {
+		t.Fatalf("setup produced %d notifications", out.len())
+	}
+
+	if n := tr.Forget("gone"); n != 1 {
+		t.Errorf("forgot %d incidents, want 1", n)
+	}
+	if out.len() != 3 {
+		t.Fatalf("got %d notifications, want a resolve for the removed target", out.len())
+	}
+	res := out.at(2)
+	if res.Status != Resolved || res.Target != "gone" {
+		t.Errorf("resolve = %+v", res)
+	}
+	// The message must not imply the fault got better. It may not have.
+	if !strings.Contains(res.Message, "removed from the configuration") {
+		t.Errorf("message = %q, should say the target was removed", res.Message)
+	}
+	if tr.Tracking() != 1 {
+		t.Errorf("tracking %d incidents, want just the one that stayed", tr.Tracking())
+	}
+}
+
+// An incident that never reached anyone is dropped quietly: announcing a
+// clearing for something nobody was told about is noise.
+func TestForgetIsQuietForUnannouncedIncidents(t *testing.T) {
+	out := &sink{}
+	tr := NewTracker(TrackerConfig{For: time.Hour, ResolveAfter: time.Hour}, out, nil)
+	tr.Notify(Finding{Target: "gone", Check: "no_segments", Severity: Critical})
+	if out.len() != 0 {
+		t.Fatalf("setup announced something it should not have")
+	}
+	if n := tr.Forget("gone"); n != 1 {
+		t.Errorf("forgot %d, want 1", n)
+	}
+	if out.len() != 0 {
+		t.Errorf("a never-announced incident produced %d notifications", out.len())
+	}
+}
+
+func TestForgetAnUnknownTargetDoesNothing(t *testing.T) {
+	out := &sink{}
+	tr := NewTracker(TrackerConfig{ResolveAfter: time.Hour}, out, nil)
+	tr.Notify(Finding{Target: "a", Check: "x", Severity: Critical})
+	if n := tr.Forget("never-existed"); n != 0 {
+		t.Errorf("forgot %d incidents for a target that was never there", n)
+	}
+	if out.len() != 1 || tr.Tracking() != 1 {
+		t.Error("forgetting an unknown target disturbed a real one")
+	}
+}
