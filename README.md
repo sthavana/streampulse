@@ -35,23 +35,34 @@ encoding team.
 
 Requires Go 1.22+. No dependencies to install.
 
+**Just the prober**, against your own streams:
+
 ```bash
 cp config.example.json config.json   # point it at your streams
-make run                             # http://localhost:9090
+make run
 ```
 
-Or the whole stack — prober, Prometheus, Grafana — against public test streams:
+That gives you the UI on http://localhost:9090, metrics on `/metrics`, and
+findings as JSON lines on stdout. Nothing else is running — Prometheus and
+Grafana are the next option.
+
+**The whole stack** — prober, Prometheus and Grafana together, against public
+test streams:
 
 ```bash
-make compose-up
+make compose-up      # make compose-down to stop it
 ```
 
 | | |
 |---|---|
 | StreamPulse UI | http://localhost:9090 |
 | Prometheus | http://localhost:9091 |
-| Grafana | http://localhost:3000 |
-| findings | JSON lines on stdout |
+| Grafana | http://localhost:3000 (anonymous, no login) |
+| findings | `docker compose -f deploy/docker-compose.yml logs -f prober` |
+
+The compose stack builds the small `scratch` image, so it has no ffprobe and
+therefore no [media inspection or thumbnails](#looking-inside-the-media-optional).
+Those need `make docker-full` and the config flags in that section.
 
 Working on it:
 
