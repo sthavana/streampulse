@@ -97,6 +97,7 @@ func main() {
 		log.Printf("frame capture using %s", inspector.FFmpegPath())
 	}
 	pr.SetInspector(inspector, cfg.Inspection.Timeout())
+	pr.SetContentThresholds(cfg.Inspection.BlackFraction, cfg.Inspection.FreezeFraction)
 
 	mux := http.NewServeMux()
 	mux.Handle("/metrics", reg.Handler())

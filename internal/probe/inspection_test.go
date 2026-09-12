@@ -380,3 +380,197 @@ func TestNonTransportStreamSegmentIsReported(t *testing.T) {
 		t.Errorf("got %+v, want ts_sync_loss", cap.findings)
 	}
 }
+
+// --- black, frozen and silent content ---
+
+func withStubFFmpeg(t *testing.T, pr *Prober, probeScript, ffmpegScript string) {
+	t.Helper()
+	dir := t.TempDir()
+	probe := filepath.Join(dir, "ffprobe")
+	ffmpeg := filepath.Join(dir, "ffmpeg")
+	for path, script := range map[string]string{probe: probeScript, ffmpeg: ffmpegScript} {
+		if err := os.WriteFile(path, []byte("#!/bin/sh\n"+script+"\n"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	i, err := inspect.New(probe)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := i.SetFFmpeg(ffmpeg); err != nil {
+		t.Fatal(err)
+	}
+	pr.SetInspector(i, 5*time.Second)
+}
+
+// Every fixture carries a duration, because the thresholds are a fraction of
+// the segment and ffmpeg is where that length comes from.
+func ffmpegSaying(lines string) string {
+	return "cat >&2 <<'OUT'\nInput #0, mov,mp4:\n  Duration: 00:00:06.00, bitrate: 1200 kb/s\n" + lines + "\nOUT"
+}
+
+// A channel showing black is a total outage that every other check reports as
+// perfectly healthy.
+func TestBlackVideoIsReported(t *testing.T) {
+	origin := fmp4Server(t)
+	defer origin.Close()
+
+	cap := &capture{}
+	pr := New(metrics.New(), cap)
+	withStubFFmpeg(t, pr, streamsMatch,
+		ffmpegSaying("[blackdetect @ 0x1] black_start:0 black_end:5.5 black_duration:5.5"))
+	pr.ProbeTarget(context.Background(), config.Target{
+		Name: "t", URL: origin.URL + "/master.m3u8", SegmentSample: 1, Inspect: true, Thumbnails: true,
+	})
+
+	if !cap.has("black_frames") {
+		t.Fatalf("an entirely black segment went undetected: %+v", cap.findings)
+	}
+}
+
+// Content is allowed to fade to black. A threshold that fires on a fade is a
+// threshold someone switches off, taking the outage detection with it.
+func TestBriefBlackIsNotReported(t *testing.T) {
+	origin := fmp4Server(t)
+	defer origin.Close()
+
+	cap := &capture{}
+	pr := New(metrics.New(), cap)
+	withStubFFmpeg(t, pr, streamsMatch,
+		ffmpegSaying("[blackdetect @ 0x1] black_start:0 black_end:0.6 black_duration:0.6"))
+	pr.ProbeTarget(context.Background(), config.Target{
+		Name: "t", URL: origin.URL + "/master.m3u8", SegmentSample: 1, Inspect: true, Thumbnails: true,
+	})
+
+	if cap.has("black_frames") {
+		t.Errorf("a 0.6s fade was reported as a fault: %+v", cap.findings)
+	}
+}
+
+func TestFrozenVideoIsReported(t *testing.T) {
+	origin := fmp4Server(t)
+	defer origin.Close()
+
+	cap := &capture{}
+	pr := New(metrics.New(), cap)
+	withStubFFmpeg(t, pr, streamsMatch,
+		ffmpegSaying("[freezedetect @ 0x2] lavfi.freezedetect.freeze_duration: 5.4"))
+	pr.SetContentThresholds(0, 0.9) // the check is off unless a channel asks for it
+	pr.ProbeTarget(context.Background(), config.Target{
+		Name: "t", URL: origin.URL + "/master.m3u8", SegmentSample: 1, Inspect: true, Thumbnails: true,
+	})
+	if !cap.has("frozen_video") {
+		t.Fatalf("frozen video went undetected: %+v", cap.findings)
+	}
+}
+
+func TestSilentAudioIsReported(t *testing.T) {
+	origin := fmp4Server(t)
+	defer origin.Close()
+
+	cap := &capture{}
+	pr := New(metrics.New(), cap)
+	withStubFFmpeg(t, pr, streamsMatch, ffmpegSaying(
+		"[Parsed_volumedetect_0 @ 0x3] mean_volume: -91.0 dB\n[Parsed_volumedetect_0 @ 0x3] max_volume: -90.3 dB"))
+	pr.ProbeTarget(context.Background(), config.Target{
+		Name: "t", URL: origin.URL + "/master.m3u8", SegmentSample: 1, Inspect: true, Thumbnails: true,
+	})
+	if !cap.has("silent_audio") {
+		t.Fatalf("digital silence went undetected: %+v", cap.findings)
+	}
+}
+
+// Quiet is not silent. A drama has passages at -45 dBFS and reporting those
+// would make the check useless on exactly the content that needs it.
+func TestQuietAudioIsNotSilence(t *testing.T) {
+	origin := fmp4Server(t)
+	defer origin.Close()
+
+	cap := &capture{}
+	pr := New(metrics.New(), cap)
+	withStubFFmpeg(t, pr, streamsMatch, ffmpegSaying(
+		"[Parsed_volumedetect_0 @ 0x3] mean_volume: -52.0 dB\n[Parsed_volumedetect_0 @ 0x3] max_volume: -45.0 dB"))
+	pr.ProbeTarget(context.Background(), config.Target{
+		Name: "t", URL: origin.URL + "/master.m3u8", SegmentSample: 1, Inspect: true, Thumbnails: true,
+	})
+	if cap.has("silent_audio") {
+		t.Errorf("a quiet passage was reported as silence: %+v", cap.findings)
+	}
+}
+
+func TestContentThresholdsAreConfigurable(t *testing.T) {
+	origin := fmp4Server(t)
+	defer origin.Close()
+
+	cap := &capture{}
+	pr := New(metrics.New(), cap)
+	withStubFFmpeg(t, pr, streamsMatch,
+		ffmpegSaying("[blackdetect @ 0x1] black_start:0 black_end:1 black_duration:1.0"))
+	pr.SetContentThresholds(0.15, 0) // a channel that should never be black at all
+	pr.ProbeTarget(context.Background(), config.Target{
+		Name: "t", URL: origin.URL + "/master.m3u8", SegmentSample: 1, Inspect: true, Thumbnails: true,
+	})
+	if !cap.has("black_frames") {
+		t.Errorf("a lowered threshold did not take effect: %+v", cap.findings)
+	}
+}
+
+// Healthy content produces nothing, which is the state these checks spend
+// almost all of their life in.
+func TestHealthyContentIsSilent(t *testing.T) {
+	origin := fmp4Server(t)
+	defer origin.Close()
+
+	cap := &capture{}
+	pr := New(metrics.New(), cap)
+	withStubFFmpeg(t, pr, streamsMatch, ffmpegSaying(
+		"[Parsed_volumedetect_0 @ 0x3] mean_volume: -20.0 dB\n[Parsed_volumedetect_0 @ 0x3] max_volume: -2.0 dB"))
+	pr.ProbeTarget(context.Background(), config.Target{
+		Name: "t", URL: origin.URL + "/master.m3u8", SegmentSample: 1, Inspect: true, Thumbnails: true,
+	})
+	if len(cap.findings) != 0 {
+		t.Fatalf("healthy content produced %+v", cap.findings)
+	}
+}
+
+// The flaw the live run found: an absolute threshold in seconds is
+// unreachable on short segments. A completely dead encoder producing 1.9s
+// segments can never report two seconds of anything.
+func TestShortSegmentsCanStillReportEntirelyBlack(t *testing.T) {
+	origin := fmp4Server(t)
+	defer origin.Close()
+
+	cap := &capture{}
+	pr := New(metrics.New(), cap)
+	withStubFFmpeg(t, pr, streamsMatch, "cat >&2 <<'OUT'\n"+
+		"  Duration: 00:00:01.92, bitrate: 800 kb/s\n"+
+		"[blackdetect @ 0x1] black_start:0 black_end:1.42 black_duration:1.42\nOUT")
+	pr.ProbeTarget(context.Background(), config.Target{
+		Name: "t", URL: origin.URL + "/master.m3u8", SegmentSample: 1, Inspect: true, Thumbnails: true,
+	})
+
+	if !cap.has("black_frames") {
+		t.Fatalf("an entirely black 1.92s segment went undetected: %+v", cap.findings)
+	}
+}
+
+// Off by default, and for a reason: Unified Streaming's demo channel is colour
+// bars, which read as frozen for 1.4s of every 1.92s segment and are perfectly
+// healthy. Only someone who knows the channel can say which it is.
+func TestFreezeCheckIsOffUnlessAskedFor(t *testing.T) {
+	origin := fmp4Server(t)
+	defer origin.Close()
+
+	cap := &capture{}
+	pr := New(metrics.New(), cap)
+	withStubFFmpeg(t, pr, streamsMatch, "cat >&2 <<'OUT'\n"+
+		"  Duration: 00:00:01.92, bitrate: 800 kb/s\n"+
+		"[freezedetect @ 0x2] lavfi.freezedetect.freeze_duration: 1.42\nOUT")
+	pr.ProbeTarget(context.Background(), config.Target{
+		Name: "t", URL: origin.URL + "/master.m3u8", SegmentSample: 1, Inspect: true, Thumbnails: true,
+	})
+
+	if cap.has("frozen_video") {
+		t.Errorf("a static test pattern was reported without being asked: %+v", cap.findings)
+	}
+}

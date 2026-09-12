@@ -46,6 +46,8 @@ const (
 	helpTSPackets      = "Transport stream packets in the sampled segment"
 	helpTSContinuity   = "Continuity counter breaks in the sampled segment"
 	helpTSTransport    = "Packets carrying the transport error indicator"
+	helpBlackSeconds   = "Longest run of black video in the sampled segment"
+	helpFreezeSeconds  = "Longest run of frozen video in the sampled segment"
 	helpStreamLive     = "1 if the stream is live, 0 if it is complete (EXT-X-ENDLIST, or MPD type=static)"
 )
 
@@ -57,6 +59,10 @@ type Prober struct {
 	// inspection check is skipped.
 	inspector  *inspect.Inspector
 	inspectFor time.Duration
+	// blackFor and freezeFor are what fraction of a segment must be black or
+	// frozen before it is worth reporting. freezeFor of 0 disables the check.
+	blackFor  float64
+	freezeFor float64
 	// frames holds the latest picture and audio level per stream, for the UI.
 	frames *inspect.Frames
 	now    func() time.Time // injectable so the cross-poll checks are testable
@@ -91,6 +97,8 @@ func New(reg *metrics.Registry, n alert.Notifier) *Prober {
 		edges:      make(map[string]*edgeState),
 		inspector:  &inspect.Inspector{},
 		inspectFor: 20 * time.Second,
+		blackFor:   0.9,
+		freezeFor:  0, // off unless asked for; see contentChecks
 		frames:     inspect.NewFrames(200),
 	}
 }
@@ -104,6 +112,18 @@ func (p *Prober) SetInspector(i *inspect.Inspector, timeout time.Duration) {
 	p.inspector = i
 	if timeout > 0 {
 		p.inspectFor = timeout
+	}
+}
+
+// SetContentThresholds sets what fraction of a segment must be black or frozen
+// before it is reported. Either at 0 disables that check; a negative black
+// threshold is how the black check is turned off, since its default is on.
+func (p *Prober) SetContentThresholds(black, freeze float64) {
+	if black != 0 {
+		p.blackFor = black
+	}
+	if freeze != 0 {
+		p.freezeFor = freeze
 	}
 }
 

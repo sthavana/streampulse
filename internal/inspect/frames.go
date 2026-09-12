@@ -25,6 +25,10 @@ type Frame struct {
 	MeanDBFS float64
 	PeakDBFS float64
 	HasAudio bool
+	// BlackSeconds and FreezeSeconds are the longest run of each in the
+	// segment this frame came from.
+	BlackSeconds  float64
+	FreezeSeconds float64
 }
 
 // Silent reports whether the audio is at or below the floor of audibility.
@@ -142,9 +146,125 @@ func (i *Inspector) Thumbnail(ctx context.Context, path string, width int) ([]by
 }
 
 var (
-	meanRe = regexp.MustCompile(`mean_volume:\s*(-?[0-9.]+) dB`)
-	peakRe = regexp.MustCompile(`max_volume:\s*(-?[0-9.]+) dB`)
+	meanRe   = regexp.MustCompile(`mean_volume:\s*(-?[0-9.]+) dB`)
+	peakRe   = regexp.MustCompile(`max_volume:\s*(-?[0-9.]+) dB`)
+	blackRe  = regexp.MustCompile(`black_duration:\s*([0-9.]+)`)
+	freezeRe = regexp.MustCompile(`freeze_duration:\s*([0-9.]+)`)
+	durRe    = regexp.MustCompile(`Duration:\s*(\d+):(\d+):([0-9.]+)`)
 )
+
+// Content is what a whole segment turned out to look and sound like, as
+// opposed to the single frame a thumbnail shows.
+type Content struct {
+	MeanDBFS float64
+	PeakDBFS float64
+	HasAudio bool
+	// BlackSeconds and FreezeSeconds are the longest run of each found in the
+	// segment, zero when there was none.
+	BlackSeconds  float64
+	FreezeSeconds float64
+	HasVideo      bool
+	// Seconds is the segment's own length, which the thresholds are relative
+	// to. An absolute one cannot work: a stream with 1.9s segments could never
+	// report two seconds of anything, however dead it was.
+	Seconds float64
+}
+
+// freezeWindow is the filter's minimum run length, subtracted when working out
+// what fraction of a segment was affected. freezedetect cannot report a run
+// shorter than this, so a completely frozen segment reports its length minus
+// this much -- 1.4s out of 1.92s on a real stream -- and measuring against the
+// raw length would make "entirely frozen" look like 73%.
+const freezeWindow = 0.5
+
+// Fraction is how much of the measurable part of the segment a run covered,
+// 0 to 1.
+func (c *Content) Fraction(runSeconds float64) float64 {
+	usable := c.Seconds - freezeWindow
+	if usable <= 0 || runSeconds <= 0 {
+		return 0
+	}
+	if f := runSeconds / usable; f < 1 {
+		return f
+	}
+	return 1
+}
+
+// Analyse measures the whole segment in one decode: audio level, black
+// video and frozen video.
+//
+// One pass rather than three. Each of these is a filter over the same decoded
+// frames, and decoding a segment three times to ask three questions about it
+// would triple the cost of the most expensive check in the tool.
+//
+// The thresholds passed to the filters are minimum durations, not the
+// reporting thresholds: ffmpeg is asked to notice short runs so the caller can
+// see how long they were and decide, rather than having the decision made
+// inside the filter.
+func (i *Inspector) Analyse(ctx context.Context, path string, hasVideo, hasAudio bool) (*Content, error) {
+	if !i.CanCapture() {
+		return nil, fmt.Errorf("frame capture is not enabled")
+	}
+	args := []string{"-v", "info", "-i", path}
+	if hasVideo {
+		// pix_th is how dark a pixel must be to count as black. The default
+		// 0.10 is near-black, which keeps a dim scene from reading as a fault.
+		args = append(args, "-vf", "blackdetect=d=0.1:pix_th=0.10,freezedetect=n=-60dB:d=0.5")
+	} else {
+		args = append(args, "-vn")
+	}
+	if hasAudio {
+		args = append(args, "-af", "volumedetect")
+	} else {
+		args = append(args, "-an")
+	}
+	args = append(args, "-sn", "-dn", "-f", "null", "-")
+
+	cmd := exec.CommandContext(ctx, i.ffmpeg, args...)
+	cmd.WaitDelay = waitDelay
+	var stderr strings.Builder
+	cmd.Stderr = &stderr
+	_ = cmd.Run()
+
+	text := stderr.String()
+	c := &Content{HasVideo: hasVideo}
+	if hasAudio {
+		m, p := meanRe.FindStringSubmatch(text), peakRe.FindStringSubmatch(text)
+		if m != nil && p != nil {
+			mean, err1 := strconv.ParseFloat(m[1], 64)
+			peak, err2 := strconv.ParseFloat(p[1], 64)
+			if err1 == nil && err2 == nil {
+				c.MeanDBFS, c.PeakDBFS, c.HasAudio = mean, peak, true
+			}
+		}
+	}
+	if hasVideo {
+		c.BlackSeconds = longest(blackRe, text)
+		c.FreezeSeconds = longest(freezeRe, text)
+	}
+	if m := durRe.FindStringSubmatch(text); m != nil {
+		h, _ := strconv.ParseFloat(m[1], 64)
+		mi, _ := strconv.ParseFloat(m[2], 64)
+		s, _ := strconv.ParseFloat(m[3], 64)
+		c.Seconds = h*3600 + mi*60 + s
+	}
+	if !c.HasAudio && !hasVideo {
+		return nil, fmt.Errorf("nothing measurable in the segment")
+	}
+	return c, nil
+}
+
+// longest returns the longest run the filter reported. A segment can contain
+// several, and what matters is the worst one.
+func longest(re *regexp.Regexp, text string) float64 {
+	var max float64
+	for _, m := range re.FindAllStringSubmatch(text, -1) {
+		if v, err := strconv.ParseFloat(m[1], 64); err == nil && v > max {
+			max = v
+		}
+	}
+	return max
+}
 
 // AudioLevel measures the segment's mean and peak level in dBFS.
 //

@@ -18,7 +18,7 @@ the CDN. By then people have already switched off.
 
 StreamPulse probes actively instead, on a tight schedule, from wherever you run
 it. It parses what it gets back the way a player would and reports faults as
-they appear — 48 checks across both formats, deduplicated into incidents
+they appear — 51 checks across both formats, deduplicated into incidents
 so one frozen playlist is one alert rather than 900.
 
 And where it can, it says which layer to look at:
@@ -101,7 +101,7 @@ open, and both times a macOS run reported everything green.
 | **Structure** | spec violations, dangling rendition groups, missing initialisation sections, empty playlists |
 | **DRM** | unretrievable keys, clear segments on an encrypted stream, malformed PSSH, keys that stopped rotating |
 | **Low latency** | chunked delivery silently degraded to whole-segment buffering, latency past the declared bound |
-| **The media itself** | codec and resolution that disagree with the manifest, declared tracks that are not there; a picture and audio level per stream *(optional, needs ffprobe/ffmpeg)* |
+| **The media itself** | codec and resolution that disagree with the manifest, declared tracks that are not there, black or frozen video, silent audio; a picture and level per stream *(optional, needs ffprobe/ffmpeg)* |
 | **Transport streams** | TR 101 290 P1: sync loss, transport errors, continuity breaks, missing PAT/PMT *(no dependency)* |
 | **Which layer** | origin versus CDN edge, from the cache headers on the response |
 
@@ -717,6 +717,42 @@ embedding one: real playback in-page would mean vendoring hls.js or
 shaka-player, and a megabyte of third-party JavaScript is a poor trade for a
 convenience that `open` already covers.
 
+### Black, frozen and silent
+
+With ffmpeg, the same decode that produces the thumbnail also measures the
+whole segment:
+
+| Check | Default | What it catches |
+|---|---|---|
+| `black_frames` | on, 90% of the segment | A channel showing black — a total outage every other check calls healthy |
+| `frozen_video` | **off** | The picture stopped moving |
+| `silent_audio` | on, below -60 dBFS | Digital silence, as opposed to quiet |
+
+```json
+"inspection": { "black_fraction": 0.9, "freeze_fraction": 0.9 }
+```
+
+**The thresholds are a fraction of the segment, not a number of seconds**, and
+that is not a preference. The first version used seconds and the live run
+showed why it cannot work: a stream with 1.92s segments can never report two
+seconds of anything, however dead it is. A fraction scales with whatever
+segment length a packager chose.
+
+The measurable window is the segment minus the filter's own minimum run,
+because `freezedetect` cannot report a run shorter than that. Measuring against
+the raw length would make "entirely frozen" read as 73%.
+
+**`frozen_video` is off by default**, and this is the honest part. A static
+picture is a fault on a news channel and the entire programme on a slate or a
+test card, and *nothing inside the segment distinguishes them*. Unified
+Streaming's demo — the one this project is tested against — is colour bars, and
+reads as frozen for about two thirds of every segment while being perfectly
+healthy. Only someone who knows the channel can say which it is, so the check
+waits to be asked. Measured either way, as `streampulse_freeze_seconds`.
+
+Silence is the one audio judgement worth making unasked: below -60 dBFS there
+is nothing there at all, which is different from a quiet passage at -45.
+
 ### How it fetches
 
 The prober downloads the bytes itself and hands ffprobe a file, rather than
@@ -880,6 +916,7 @@ somewhere private, as you would for `/metrics` itself.
 `streampulse_stream_live`, `streampulse_media_readable`,
 `streampulse_media_streams`, `streampulse_inspect_seconds`,
 `streampulse_audio_peak_dbfs`, `streampulse_audio_mean_dbfs`,
+`streampulse_black_seconds`, `streampulse_freeze_seconds`,
 `streampulse_ts_aligned`, `streampulse_ts_packets`,
 `streampulse_ts_continuity_errors`, `streampulse_ts_transport_errors`,
 `streampulse_key_fetch_seconds`,
@@ -1007,10 +1044,6 @@ Packages: `hls` and `dash` (manifest parsers), `probe` (prober + checks),
   [done](#transport-stream-integrity); the timing measurements -- PCR jitter,
   PTS repetition intervals -- need a continuous stream, which means a new
   input path and TSDuck behind it
-- **Black and frozen video as checks**: the frame capture already decodes the
-  picture, so `blackdetect` and a frame-to-frame comparison are a short step
-  from here. Both need a duration threshold to avoid firing on a legitimate
-  fade to black at an ad boundary
 - **Multi-vantage probing** (run from several regions; compare)
 - **Cross-layer correlation**: map a QoE symptom to the offending layer
   (started: manifest findings already carry an origin-vs-edge verdict)

@@ -224,3 +224,63 @@ func TestThumbnailRejectsAnEmptyResult(t *testing.T) {
 		t.Error("expected an error when ffmpeg produced nothing")
 	}
 }
+
+// One decode, three measurements. ffmpeg reports all of them on stderr among
+// its ordinary chatter.
+func TestAnalyseReadsBlackFreezeAndLevel(t *testing.T) {
+	i := &Inspector{ffmpeg: stubFFprobe(t, `cat >&2 <<'OUT'
+Input #0, mpegts, from 'seg.ts':
+  Duration: 00:00:06.00, bitrate: 1200 kb/s
+[blackdetect @ 0x1] black_start:0 black_end:1.2 black_duration:1.2
+[blackdetect @ 0x1] black_start:3 black_end:5.5 black_duration:2.5
+[freezedetect @ 0x2] lavfi.freezedetect.freeze_duration: 0.8
+[Parsed_volumedetect_0 @ 0x3] mean_volume: -23.4 dB
+[Parsed_volumedetect_0 @ 0x3] max_volume: -3.1 dB
+OUT`)}
+	c, err := i.Analyse(context.Background(), "seg.ts", true, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A segment can hold several runs; the worst one is what matters.
+	if c.BlackSeconds != 2.5 {
+		t.Errorf("black = %v, want the longest run of 2.5", c.BlackSeconds)
+	}
+	if c.FreezeSeconds != 0.8 {
+		t.Errorf("freeze = %v, want 0.8", c.FreezeSeconds)
+	}
+	if !c.HasAudio || c.PeakDBFS != -3.1 || c.MeanDBFS != -23.4 {
+		t.Errorf("audio = %+v", c)
+	}
+}
+
+func TestAnalyseOnCleanContent(t *testing.T) {
+	i := &Inspector{ffmpeg: stubFFprobe(t, `cat >&2 <<'OUT'
+[Parsed_volumedetect_0 @ 0x3] mean_volume: -18.0 dB
+[Parsed_volumedetect_0 @ 0x3] max_volume: -1.0 dB
+OUT`)}
+	c, err := i.Analyse(context.Background(), "seg.ts", true, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.BlackSeconds != 0 || c.FreezeSeconds != 0 {
+		t.Errorf("nothing reported should mean zero, got black=%v freeze=%v", c.BlackSeconds, c.FreezeSeconds)
+	}
+}
+
+// A video-only stream has no level to read and an audio-only one has no
+// picture; neither is a failure.
+func TestAnalyseHandlesSingleKindStreams(t *testing.T) {
+	i := &Inspector{ffmpeg: stubFFprobe(t, `cat >&2 <<'OUT'
+[blackdetect @ 0x1] black_start:0 black_end:4 black_duration:4
+OUT`)}
+	c, err := i.Analyse(context.Background(), "seg.m4s", true, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c.HasAudio {
+		t.Error("a video-only stream should report no audio")
+	}
+	if c.BlackSeconds != 4 {
+		t.Errorf("black = %v, want 4", c.BlackSeconds)
+	}
+}

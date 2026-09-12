@@ -198,6 +198,18 @@ type Inspection struct {
 	FFmpeg string `json:"ffmpeg,omitempty"`
 	// TimeoutSeconds bounds one ffprobe run. Defaults to 20.
 	TimeoutSeconds int `json:"timeout_seconds,omitempty"`
+	// BlackFraction is how much of a segment must be black before it is
+	// reported, 0 to 1. Defaults to 0.9; set it negative to disable.
+	//
+	// A fraction rather than a number of seconds, because an absolute
+	// threshold cannot work across segment lengths: a stream with 1.9s
+	// segments could never report two seconds of anything, however dead.
+	BlackFraction float64 `json:"black_fraction,omitempty"`
+	// FreezeFraction is the same for frozen video, and is **off by default**.
+	// A static picture is a fault on a news channel and the entire programme
+	// on a slate, and nothing inside the segment tells them apart -- only
+	// someone who knows the channel can.
+	FreezeFraction float64 `json:"freeze_fraction,omitempty"`
 }
 
 func (i Inspection) Timeout() time.Duration {

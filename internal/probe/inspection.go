@@ -91,25 +91,73 @@ func (p *Prober) capture(ctx context.Context, t config.Target, variant string,
 		}
 	}
 
+	hasVideo, hasAudio := media.Video() != nil, media.Audio() != nil
+
 	frame := inspect.Frame{At: p.now().UTC()}
-	if media.Video() != nil {
-		jpeg, err := p.inspector.Thumbnail(cctx, path, 320)
-		if err == nil {
+	if hasVideo {
+		if jpeg, err := p.inspector.Thumbnail(cctx, path, 320); err == nil {
 			frame.JPEG = jpeg
 		}
 	}
-	if media.Audio() != nil {
-		mean, peak, err := p.inspector.AudioLevel(cctx, path)
-		if err == nil {
-			frame.MeanDBFS, frame.PeakDBFS, frame.HasAudio = mean, peak, true
-			p.reg.SetGauge("streampulse_audio_peak_dbfs", helpAudioPeak, peak, labels)
-			p.reg.SetGauge("streampulse_audio_mean_dbfs", helpAudioMean, mean, labels)
+
+	content, err := p.inspector.Analyse(cctx, path, hasVideo, hasAudio)
+	if err == nil {
+		frame.MeanDBFS, frame.PeakDBFS, frame.HasAudio = content.MeanDBFS, content.PeakDBFS, content.HasAudio
+		frame.BlackSeconds, frame.FreezeSeconds = content.BlackSeconds, content.FreezeSeconds
+		if content.HasAudio {
+			p.reg.SetGauge("streampulse_audio_peak_dbfs", helpAudioPeak, content.PeakDBFS, labels)
+			p.reg.SetGauge("streampulse_audio_mean_dbfs", helpAudioMean, content.MeanDBFS, labels)
 		}
+		if hasVideo {
+			p.reg.SetGauge("streampulse_black_seconds", helpBlackSeconds, content.BlackSeconds, labels)
+			p.reg.SetGauge("streampulse_freeze_seconds", helpFreezeSeconds, content.FreezeSeconds, labels)
+		}
+		p.contentChecks(t, variant, content)
 	}
 	if frame.JPEG != nil || frame.HasAudio {
 		p.frames.Put(inspect.FrameKey(t.Name, variant), frame)
 	}
 }
+
+// contentChecks turns the measurements into findings.
+//
+// All three are warnings rather than critical, and the thresholds are
+// generous, because content is allowed to be black, frozen and silent. A fade
+// at an ad boundary, a slate between programmes, a pause in dialogue: each
+// looks exactly like the fault it is not. The thresholds separate them, and
+// alerting.for_seconds adds the second layer if a stream needs it -- damping
+// belongs in one place, and that place is already the tracker.
+func (p *Prober) contentChecks(t config.Target, variant string, c *inspect.Content) {
+	now := p.now().UTC()
+	if c.HasVideo && c.Seconds > 0 {
+		if f := c.Fraction(c.BlackSeconds); p.blackFor > 0 && f >= p.blackFor {
+			p.record(finding(now, t, variant, alert.Warning, "black_frames",
+				"video is black for "+ftoa(c.BlackSeconds)+"s of a "+ftoa(c.Seconds)+
+					"s segment ("+pct(f)+")"))
+		}
+		// Off unless asked for. A static picture is a fault on a news channel
+		// and the entire programme on a slate or a test pattern, and nothing
+		// in the segment distinguishes them -- only whoever knows the channel
+		// can. Unified Streaming's demo, which is colour bars, reads as
+		// frozen for 1.4s of every 1.92s segment, and is perfectly healthy.
+		if f := c.Fraction(c.FreezeSeconds); p.freezeFor > 0 && f >= p.freezeFor {
+			p.record(finding(now, t, variant, alert.Warning, "frozen_video",
+				"video is frozen for "+ftoa(c.FreezeSeconds)+"s of a "+ftoa(c.Seconds)+
+					"s segment ("+pct(f)+")"))
+		}
+	}
+	// Digital silence is the one audio judgement worth making without knowing
+	// the programme: below -60 dBFS there is nothing there at all.
+	if c.HasAudio && c.PeakDBFS <= silenceFloor {
+		p.record(finding(now, t, variant, alert.Warning, "silent_audio",
+			"audio peaks at "+ftoa(c.PeakDBFS)+" dBFS across the sampled segment, which is silence"))
+	}
+}
+
+// silenceFloor is where "quiet" stops and "nothing" starts.
+const silenceFloor = -60
+
+func pct(f float64) string { return ftoa(f*100) + "%" }
 
 // prefix puts the initialisation segment in front of the media segment, in
 // place, so ffmpeg is handed one decodable file.
