@@ -76,6 +76,7 @@ type Target struct {
 	Up       *bool    `json:"up,omitempty"`
 	Live     *bool    `json:"live,omitempty"`
 	Metrics  Values   `json:"metrics"`
+	Trends   Trends   `json:"trends,omitempty"`
 	Streams  []Stream `json:"streams"`
 	Firing   int      `json:"firing"`
 }
@@ -86,6 +87,7 @@ type Stream struct {
 	Up      *bool  `json:"up,omitempty"`
 	Live    *bool  `json:"live,omitempty"`
 	Metrics Values `json:"metrics"`
+	Trends  Trends `json:"trends,omitempty"`
 	Firing  int    `json:"firing"`
 	// Thumb is the URL of the latest captured frame, empty when there is
 	// none. It carries the capture time so a browser fetches the new picture
@@ -108,6 +110,10 @@ type AudioLevel struct {
 // Values is the metric set for one row, keyed by the metric name with the
 // streampulse_ prefix stripped.
 type Values map[string]float64
+
+// Trends is the recent history of the few metrics worth a sparkline, keyed
+// the same way.
+type Trends map[string][]float64
 
 // Handler serves the UI at / and its data at /api/state.
 func Handler(s Sources) http.Handler {
@@ -170,6 +176,7 @@ func Build(s Sources) State {
 	// target -> variant -> metric name -> value. The empty variant is the
 	// target's own row.
 	byTarget := map[string]map[string]Values{}
+	trends := map[string]map[string]Trends{}
 	for _, sample := range s.Registry.Snapshot() {
 		target := sample.Labels["target"]
 		if target == "" {
@@ -178,11 +185,17 @@ func Build(s Sources) State {
 		variant := sample.Labels["variant"]
 		if byTarget[target] == nil {
 			byTarget[target] = map[string]Values{}
+			trends[target] = map[string]Trends{}
 		}
 		if byTarget[target][variant] == nil {
 			byTarget[target][variant] = Values{}
+			trends[target][variant] = Trends{}
 		}
-		byTarget[target][variant][strings.TrimPrefix(sample.Name, "streampulse_")] = sample.Value
+		short := strings.TrimPrefix(sample.Name, "streampulse_")
+		byTarget[target][variant][short] = sample.Value
+		if len(sample.History) > 1 {
+			trends[target][variant][short] = sample.History
+		}
 	}
 
 	if s.Tracker != nil {
@@ -210,7 +223,8 @@ func Build(s Sources) State {
 		rows := byTarget[t.Name]
 		tv := Target{
 			Name: t.Name, URL: t.URL, Format: format(t), Interval: t.Interval().String(),
-			Metrics: rows[""], Firing: firingByTarget[t.Name],
+			Metrics: rows[""], Trends: trends[t.Name][""],
+			Firing:  firingByTarget[t.Name],
 			Streams: []Stream{},
 		}
 		if tv.Metrics == nil {
@@ -223,7 +237,7 @@ func Build(s Sources) State {
 				continue
 			}
 			stream := Stream{
-				Name: variant, Metrics: vals,
+				Name: variant, Metrics: vals, Trends: trends[t.Name][variant],
 				Firing: firingByStream[t.Name+"\x00"+variant],
 				Up:     boolOf(vals, "variant_up"),
 				Live:   boolOf(vals, "stream_live"),
@@ -273,7 +287,18 @@ func Build(s Sources) State {
 		}
 		st.Targets = append(st.Targets, tv)
 	}
-	sort.Slice(st.Targets, func(i, j int) bool { return st.Targets[i].Name < st.Targets[j].Name })
+	// Trouble first. A page where the broken target is third alphabetically is
+	// a page you have to read rather than glance at.
+	sort.Slice(st.Targets, func(i, j int) bool {
+		a, b := st.Targets[i], st.Targets[j]
+		if (a.Firing > 0) != (b.Firing > 0) {
+			return a.Firing > 0
+		}
+		if down(a) != down(b) {
+			return down(a)
+		}
+		return a.Name < b.Name
+	})
 
 	if s.Recorder != nil {
 		if recent := s.Recorder.Recent(); recent != nil {
@@ -282,6 +307,10 @@ func Build(s Sources) State {
 	}
 	return st
 }
+
+// down reports a target known to be unreachable, as opposed to one not yet
+// probed. Both sort above the healthy ones, but only this is a fact.
+func down(t Target) bool { return t.Up != nil && !*t.Up }
 
 // format renders the manifest format for display, resolving the empty
 // "detect it from the body" case to what was actually detected.

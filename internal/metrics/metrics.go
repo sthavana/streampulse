@@ -30,6 +30,13 @@ type Registry struct {
 	// the same series names, and without something to tell them apart the
 	// second one silently overwrites the first in Prometheus.
 	constant map[string]string
+	// history keeps the last few values of a few series, for the sparklines
+	// in the web UI. Opt-in per metric name and hard-capped, because this is
+	// a monitoring tool's own memory and Prometheus is where history is
+	// supposed to live.
+	history    map[string][]float64
+	historyFor map[string]bool
+	historyMax int
 }
 
 // Sample is one series in structured form.
@@ -37,6 +44,9 @@ type Sample struct {
 	Name   string            `json:"name"`
 	Labels map[string]string `json:"labels,omitempty"`
 	Value  float64           `json:"value"`
+	// History is the recent values, oldest first, for metrics that were
+	// registered with TrackHistory. Empty for everything else.
+	History []float64 `json:"history,omitempty"`
 }
 
 func New() *Registry {
@@ -45,6 +55,30 @@ func New() *Registry {
 		help:  make(map[string]string),
 		types: make(map[string]string),
 		meta:  make(map[string]Sample),
+	}
+}
+
+// TrackHistory keeps the last n values of the named gauges.
+//
+// A trend answers a question a single reading cannot: 172ms means little,
+// 172ms after a minute at 40ms means the CDN is going. Grafana answers that
+// too, but only once you go and look, and the point of this page is not
+// having to.
+//
+// Deliberately a handful of named metrics rather than all of them: this is
+// memory inside a monitoring process, and the place history belongs is the
+// time series database it already writes to.
+func (r *Registry) TrackHistory(n int, names ...string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if n <= 0 {
+		n = 60
+	}
+	r.historyMax = n
+	r.history = make(map[string][]float64)
+	r.historyFor = make(map[string]bool, len(names))
+	for _, name := range names {
+		r.historyFor[name] = true
 	}
 }
 
@@ -89,6 +123,14 @@ func (r *Registry) SetGauge(name, help string, value float64, labels map[string]
 	key := seriesKey(name, labels)
 	r.vals[key] = value
 	r.remember(key, name, labels)
+
+	if r.historyFor[name] {
+		h := append(r.history[key], value)
+		if len(h) > r.historyMax {
+			h = h[len(h)-r.historyMax:]
+		}
+		r.history[key] = h
+	}
 }
 
 // IncCounter increments a counter series by one.
@@ -122,6 +164,9 @@ func (r *Registry) Snapshot() []Sample {
 	for key, v := range r.vals {
 		s := r.meta[key]
 		s.Value = v
+		if h := r.history[key]; len(h) > 1 {
+			s.History = append([]float64(nil), h...)
+		}
 		if s.Name == "" {
 			s.Name = key // a series recorded before meta existed; should not happen
 		}
@@ -150,6 +195,7 @@ func (r *Registry) DropLabel(label, value string) int {
 		}
 		delete(r.meta, key)
 		delete(r.vals, key)
+		delete(r.history, key)
 		dropped++
 	}
 	// r.order and the help text are left alone: they are per metric name, not

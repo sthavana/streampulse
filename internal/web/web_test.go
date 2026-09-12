@@ -351,3 +351,75 @@ func TestTargetsAreReadLive(t *testing.T) {
 		t.Errorf("a removed target is still listed: %+v", got)
 	}
 }
+
+// The sparklines are what make the page worth glancing at rather than reading,
+// and they arrive through the same pivot as the values.
+func TestTrendsReachTargetsAndStreams(t *testing.T) {
+	reg := metrics.New()
+	reg.TrackHistory(60, "streampulse_manifest_fetch_seconds", "streampulse_segment_ttfb_seconds")
+	for i := 0; i < 3; i++ {
+		reg.SetGauge("streampulse_manifest_fetch_seconds", "h", 0.01*float64(i), map[string]string{"target": "live"})
+		reg.SetGauge("streampulse_segment_ttfb_seconds", "h", 0.1*float64(i),
+			map[string]string{"target": "live", "variant": "video/v0"})
+		// Not registered for history, so it must arrive as a value alone.
+		reg.SetGauge("streampulse_segment_count", "h", float64(i),
+			map[string]string{"target": "live", "variant": "video/v0"})
+	}
+	src := Sources{Registry: reg, Targets: fixed(config.Target{Name: "live", URL: "http://x/y.m3u8"})}
+
+	tgt := Build(src).Targets[0]
+	if got := tgt.Trends["manifest_fetch_seconds"]; len(got) != 3 {
+		t.Fatalf("target trend = %v, want three points", got)
+	}
+	if len(tgt.Streams) != 1 {
+		t.Fatalf("streams = %+v", tgt.Streams)
+	}
+	st := tgt.Streams[0]
+	if got := st.Trends["segment_ttfb_seconds"]; len(got) != 3 || got[2] != 0.2 {
+		t.Fatalf("stream trend = %v, want three points ending at the newest", got)
+	}
+	if _, ok := st.Trends["segment_count"]; ok {
+		t.Errorf("an untracked metric brought a trend along: %v", st.Trends)
+	}
+}
+
+// A page where the broken target is third alphabetically is a page you have to
+// read rather than glance at.
+func TestTroubleSortsFirst(t *testing.T) {
+	reg := metrics.New()
+	reg.SetGauge("streampulse_probe_up", "h", 1, map[string]string{"target": "aaa-healthy"})
+	reg.SetGauge("streampulse_probe_up", "h", 0, map[string]string{"target": "zzz-down"})
+
+	tr := alert.NewTracker(alert.TrackerConfig{}, alert.NewRecorder(10), nil)
+	tr.Notify(alert.Finding{Target: "mmm-firing", Check: "edge_stale", Severity: alert.Warning, Message: "x"})
+
+	src := Sources{Registry: reg, Tracker: tr, Targets: fixed(
+		config.Target{Name: "aaa-healthy", URL: "http://a/x.m3u8"},
+		config.Target{Name: "mmm-firing", URL: "http://m/x.m3u8"},
+		config.Target{Name: "zzz-down", URL: "http://z/x.m3u8"},
+	)}
+
+	var order []string
+	for _, tg := range Build(src).Targets {
+		order = append(order, tg.Name)
+	}
+	want := []string{"mmm-firing", "zzz-down", "aaa-healthy"}
+	if strings.Join(order, ",") != strings.Join(want, ",") {
+		t.Errorf("order = %v, want firing, then down, then healthy: %v", order, want)
+	}
+}
+
+// Unprobed is not the same as down. A target that has said nothing yet must
+// not push a working stream off the top of the page.
+func TestUnprobedDoesNotSortAsDown(t *testing.T) {
+	reg := metrics.New()
+	reg.SetGauge("streampulse_probe_up", "h", 1, map[string]string{"target": "aaa-healthy"})
+
+	src := Sources{Registry: reg, Targets: fixed(
+		config.Target{Name: "aaa-healthy", URL: "http://a/x.m3u8"},
+		config.Target{Name: "bbb-unprobed", URL: "http://b/x.m3u8"},
+	)}
+	if got := Build(src).Targets[0].Name; got != "aaa-healthy" {
+		t.Errorf("first target = %q, want the alphabetical order kept", got)
+	}
+}

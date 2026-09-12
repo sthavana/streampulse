@@ -40,6 +40,14 @@ func main() {
 	}
 
 	reg := metrics.New()
+	// The three trends worth seeing at a glance: a CDN slowing down, a cache
+	// going stale, and a DVR window shrinking.
+	reg.TrackHistory(60,
+		"streampulse_segment_ttfb_seconds",
+		"streampulse_manifest_age_seconds",
+		"streampulse_playlist_window_seconds",
+		"streampulse_manifest_fetch_seconds",
+	)
 	if cfg.Vantage != "" {
 		reg.SetConstantLabels(map[string]string{"vantage": cfg.Vantage})
 		log.Printf("observing as vantage %q", cfg.Vantage)

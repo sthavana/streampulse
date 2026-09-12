@@ -966,6 +966,13 @@ and `deploy/` wires them up. This answers the different question you have while
 pointing the tool at a stream for the first time: what did it find, what is it
 probing, and is anything broken this second.
 
+Anything firing sorts to the top and is outlined in red, so trouble is seen
+rather than read. Alongside a handful of numbers -- TTFB, manifest age, window
+length, manifest fetch time -- is an inline sparkline of its last sixty polls,
+because 172ms means little on its own and means a great deal after a minute at
+40ms. That history lives in the process, capped, for those metrics only; the
+place history belongs is the time series database it already writes to.
+
 - Every target with its format, live/VOD, poll interval, reachability, manifest
   fetch time and cache verdict, and a link to open the stream in a player.
 - The newest frame and audio level per stream, when frame capture is enabled.
@@ -982,7 +989,8 @@ records of the same observation drift, and the one on the dashboard is the one
 nobody notices is wrong.
 
 The page is served from the binary with no external assets, so it works on an
-air-gapped host. It is **unauthenticated and read-only**: bind `metrics_addr`
+air-gapped host. It lays out down to phone width, where the tables scroll
+sideways in their own box rather than dragging the page with them. It is **unauthenticated and read-only**: bind `metrics_addr`
 somewhere private, as you would for `/metrics` itself.
 
 ## Metrics exposed (`/metrics`)
