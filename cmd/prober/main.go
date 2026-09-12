@@ -91,6 +91,11 @@ func main() {
 	} else if inspector.Available() {
 		log.Printf("media inspection using %s", inspector.Path())
 	}
+	if err := inspector.SetFFmpeg(cfg.Inspection.FFmpeg); err != nil {
+		log.Printf("frame capture disabled: %v", err)
+	} else if inspector.CanCapture() {
+		log.Printf("frame capture using %s", inspector.FFmpegPath())
+	}
 	pr.SetInspector(inspector, cfg.Inspection.Timeout())
 
 	mux := http.NewServeMux()
@@ -99,7 +104,7 @@ func main() {
 		_, _ = w.Write([]byte("ok"))
 	})
 	mux.Handle("/", web.Handler(web.Sources{
-		Registry: reg, Tracker: tracker, Recorder: recorder,
+		Registry: reg, Tracker: tracker, Recorder: recorder, Frames: pr.Frames(),
 		Targets: cfg.Targets, Started: time.Now(),
 	}))
 	srv := &http.Server{Addr: cfg.MetricsAddr, Handler: mux}

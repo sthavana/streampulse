@@ -60,6 +60,29 @@
   .sev.info     { background: color-mix(in srgb, var(--info) 15%, transparent); color: var(--info); }
   .msg { font-family: var(--mono); font-size: 11.5px; color: var(--dim); word-break: break-word; }
   .quiet { color: var(--dim); padding: 14px; font-size: 13px; }
+
+  /* Picture and meter stack in one fixed-width cell so rows stay aligned. */
+  .media { display: flex; flex-direction: column; gap: 4px; width: 92px; }
+  .thumb {
+    width: 92px; height: 52px; object-fit: cover; border-radius: 4px;
+    border: 1px solid var(--line); background: #000; display: block;
+  }
+  .thumb-none {
+    width: 92px; height: 52px; border-radius: 4px; border: 1px dashed var(--line);
+    display: flex; align-items: center; justify-content: center;
+    font-size: 10px; color: var(--dim);
+  }
+  /* A meter, not a gauge: dBFS runs from silence at -60 to full scale at 0. */
+  .meter { display: flex; align-items: center; gap: 5px; }
+  .meter .bar { width: 44px; height: 5px; border-radius: 3px; background: var(--line); overflow: hidden; flex: none; }
+  /* display:block, or width and height do not apply to an inline span. */
+  .meter .fill { display: block; height: 100%; background: var(--ok); }
+  .meter.silent .fill { background: var(--crit); }
+  .meter .db { font-family: var(--mono); font-size: 10.5px; color: var(--dim); white-space: nowrap; }
+  .meter.silent .db { color: var(--crit); font-weight: 600; }
+  a.open { font-size: 11px; color: var(--accent); text-decoration: none; border: 1px solid var(--line);
+           border-radius: 5px; padding: 1px 7px; white-space: nowrap; }
+  a.open:hover { border-color: var(--accent); }
   .status-firing { color: var(--crit); font-weight: 600; }
   .status-resolved { color: var(--ok); font-weight: 600; }
   .stale { opacity: .45; }
@@ -136,10 +159,32 @@ function incidents(list) {
     <tbody>${rows}</tbody></table></div>`;
 }
 
-function streamRow(st) {
+// dBFS is logarithmic and runs from digital silence near -91 to full scale at
+// 0. The meter shows -60..0, because below -60 there is nothing to see anyway.
+function meter(a) {
+  if (!a) return "";
+  const pct = Math.max(0, Math.min(100, ((a.peak_dbfs + 60) / 60) * 100));
+  return `<div class="meter${a.silent ? " silent" : ""}" title="peak ${a.peak_dbfs.toFixed(1)} dBFS, mean ${a.mean_dbfs.toFixed(1)} dBFS">
+      <span class="bar"><span class="fill" style="width:${pct.toFixed(0)}%"></span></span>
+      <span class="db">${a.silent ? "silent" : a.peak_dbfs.toFixed(0) + " dB"}</span>
+    </div>`;
+}
+
+function thumb(st) {
+  if (st.thumb) return `<img class="thumb" src="${esc(st.thumb)}" alt="latest frame from ${esc(st.name)}" loading="lazy">`;
+  if (st.audio) return `<div class="thumb-none">audio</div>`;
+  return `<div class="thumb-none"></div>`;
+}
+
+// showMedia is decided per *table*, not per row. A row that happens to have no
+// picture this cycle -- an audio measurement that failed, a stream not captured
+// yet -- must still render the cell, or its columns shift left out from under
+// the header.
+function streamRow(st, showMedia) {
   const m = st.metrics || {};
   const has = (k) => m[k] !== undefined;
   return `<tr>
+    ${showMedia ? `<td><div class="media">${thumb(st)}${st.audio ? meter(st.audio) : ""}</div></td>` : ""}
     <td class="name">${dot(st.up)} ${esc(st.name)}${
       st.firing ? ` <span class="sev critical">${st.firing}</span>` : ""}</td>
     <td class="num">${has("segment_count") ? num(m.segment_count) : ""}</td>
@@ -154,6 +199,7 @@ function streamRow(st) {
 
 function target(t) {
   const m = t.metrics || {};
+  const anyMedia = t.streams.some(s => s.thumb || s.audio);
   const bits = [];
   if (m.manifest_fetch_seconds !== undefined) bits.push(`manifest ${secs(m.manifest_fetch_seconds)}`);
   if (m.manifest_age_seconds !== undefined) bits.push(`age ${secs(m.manifest_age_seconds)}`);
@@ -164,10 +210,10 @@ function target(t) {
   if (m.period_count > 1) bits.push(`${num(m.period_count)} periods`);
 
   const body = t.streams.length ? `<table>
-      <thead><tr><th>stream</th><th class="num">segs</th><th class="num">window</th>
+      <thead><tr>${anyMedia ? "<th>picture</th>" : ""}<th>stream</th><th class="num">segs</th><th class="num">window</th>
         <th class="num">edge</th><th class="num">ttfb</th><th class="num">init</th>
         <th class="num">drm</th><th class="num">chunked</th></tr></thead>
-      <tbody>${t.streams.map(streamRow).join("")}</tbody></table>`
+      <tbody>${t.streams.map(s => streamRow(s, anyMedia)).join("")}</tbody></table>`
     : `<div class="quiet">No streams probed yet.</div>`;
 
   return `<div class="card">
@@ -179,7 +225,7 @@ function target(t) {
       <span class="tag">every ${esc(t.interval)}</span>
       ${t.firing ? `<span class="sev critical">${t.firing} firing</span>` : ""}
       <span class="tag" style="margin-left:auto">${esc(bits.join(" · "))}</span>
-      <span class="url">${esc(t.url)}</span>
+      <span class="url">${esc(t.url)} <a class="open" href="${esc(t.url)}" target="_blank" rel="noopener">open ↗</a></span>
     </div>
     ${body}
   </div>`;

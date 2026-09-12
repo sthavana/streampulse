@@ -25,6 +25,7 @@ import (
 // what makes the dependency optional: callers ask Available and skip.
 type Inspector struct {
 	ffprobe string
+	ffmpeg  string
 }
 
 // New resolves the ffprobe binary. path may be:

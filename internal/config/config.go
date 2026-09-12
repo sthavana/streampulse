@@ -38,6 +38,10 @@ type Target struct {
 	// spawns a process and makes its own fetch, so it is not something to turn
 	// on for forty targets without meaning to.
 	Inspect bool `json:"inspect,omitempty"`
+	// Thumbnails additionally decodes a frame and measures the audio level of
+	// the newest segment, for the web UI. It downloads a whole segment and
+	// decodes it, so it costs considerably more than Inspect and is separate.
+	Thumbnails bool `json:"thumbnails,omitempty"`
 
 	NoCache bool              `json:"no_cache,omitempty"`
 	Headers map[string]string `json:"headers,omitempty"` // extra request headers (auth tokens, CDN overrides)
@@ -183,6 +187,8 @@ func (m MaintenanceWindow) window() (alert.Window, error) {
 type Inspection struct {
 	// FFprobe is "" to disable, "auto" to find it on $PATH, or an explicit path.
 	FFprobe string `json:"ffprobe,omitempty"`
+	// FFmpeg enables the picture and level meter in the web UI. Same forms.
+	FFmpeg string `json:"ffmpeg,omitempty"`
 	// TimeoutSeconds bounds one ffprobe run. Defaults to 20.
 	TimeoutSeconds int `json:"timeout_seconds,omitempty"`
 }

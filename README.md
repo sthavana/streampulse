@@ -62,7 +62,7 @@ make compose-up
 | **Structure** | spec violations, dangling rendition groups, missing initialisation sections, empty playlists |
 | **DRM** | unretrievable keys, clear segments on an encrypted stream, malformed PSSH, keys that stopped rotating |
 | **Low latency** | chunked delivery silently degraded to whole-segment buffering, latency past the declared bound |
-| **The media itself** | codec and resolution that disagree with the manifest, declared tracks that are not there *(optional, needs ffprobe)* |
+| **The media itself** | codec and resolution that disagree with the manifest, declared tracks that are not there; a picture and audio level per stream *(optional, needs ffprobe/ffmpeg)* |
 | **Which layer** | origin versus CDN edge, from the cache headers on the response |
 
 Each is a named check with a severity; the tables further down list every one.
@@ -586,6 +586,48 @@ audio codec in `CODECS` while carrying video only, which is how most modern
 HLS is packaged. (This one was not foresight -- real ffprobe reported it
 against Apple's own example the first time it ran.)
 
+### Pictures and levels
+
+With ffmpeg alongside ffprobe, the UI shows the newest frame from each video
+stream and an audio meter for each audio stream:
+
+```json
+"inspection": { "ffprobe": "auto", "ffmpeg": "auto" },
+"targets": [
+  { "name": "channel-1", "inspect": true, "thumbnails": true, ... }
+]
+```
+
+![Pictures and audio levels beside the metrics](docs/screenshot-media.png)
+
+This answers a question none of the 42 checks do. Not "does the manifest
+describe a stream" or "do the segments decode", but *is there actually a
+picture, and is there any sound*. An operator answers that in a glance and no
+assertion substitutes for it — and unlike a player, a column of thumbnails
+answers it for every stream at once.
+
+It is a separate flag from `inspect` because it costs much more: a whole
+segment downloaded and decoded per stream per poll, rather than a few kilobytes
+of initialisation segment.
+
+For fMP4 the initialisation segment is concatenated in front of the media
+segment before anything is handed to ffmpeg — a media segment carries samples
+and no description of them, so alone it is undecodable. A transport stream
+segment is self-describing and needs no prefix.
+
+The audio figure is a **measurement, not a verdict**. Whether a level is a
+fault depends on the programme — a drama has quiet passages a news channel does
+not — so the number is reported, exported as
+`streampulse_audio_peak_dbfs`, and the judgement left to whoever knows the
+content. The one exception is digital silence: below -60 dBFS there is nothing
+there at all, and the meter says so.
+
+Each target's URL also carries an **open** link, for when you want to actually
+watch and hear one. It hands the manifest to your browser or player rather than
+embedding one: real playback in-page would mean vendoring hls.js or
+shaka-player, and a megabyte of third-party JavaScript is a poor trade for a
+convenience that `open` already covers.
+
 ### How it fetches
 
 The prober downloads the bytes itself and hands ffprobe a file, rather than
@@ -716,7 +758,8 @@ pointing the tool at a stream for the first time: what did it find, what is it
 probing, and is anything broken this second.
 
 - Every target with its format, live/VOD, poll interval, reachability, manifest
-  fetch time and cache verdict.
+  fetch time and cache verdict, and a link to open the stream in a player.
+- The newest frame and audio level per stream, when frame capture is enabled.
 - Every variant, rendition and representation underneath it, with segment
   count, window length, live-edge position, TTFB, initialisation segment, DRM
   and chunked delivery.
@@ -747,6 +790,7 @@ somewhere private, as you would for `/metrics` itself.
 `streampulse_init_segment_available`, `streampulse_chunked_delivery`,
 `streampulse_stream_live`, `streampulse_media_readable`,
 `streampulse_media_streams`, `streampulse_inspect_seconds`,
+`streampulse_audio_peak_dbfs`, `streampulse_audio_mean_dbfs`,
 `streampulse_key_fetch_seconds`,
 `streampulse_incident_active`, `streampulse_incidents_opened_total`,
 `streampulse_incidents_resolved_total`, `streampulse_maintenance_active`,
@@ -872,9 +916,10 @@ Packages: `hls` and `dash` (manifest parsers), `probe` (prober + checks),
   290 measures a continuous transport stream, usually multicast, where this
   tool pulls HTTP. The timing measurements that are the point of it -- PCR
   jitter, PTS repetition intervals -- cannot be taken from isolated segments
-- **Frame-level inspection**: black and frozen video, silent audio. Needs
-  ffmpeg's filters rather than ffprobe, and for fMP4 the initialisation segment
-  concatenated with a media segment before anything can be decoded
+- **Black and frozen video as checks**: the frame capture already decodes the
+  picture, so `blackdetect` and a frame-to-frame comparison are a short step
+  from here. Both need a duration threshold to avoid firing on a legitimate
+  fade to black at an ad boundary
 - **Multi-vantage probing** (run from several regions; compare)
 - **Cross-layer correlation**: map a QoE symptom to the offending layer
   (started: manifest findings already carry an origin-vs-edge verdict)

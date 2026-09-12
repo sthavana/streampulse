@@ -10,6 +10,7 @@ import (
 
 	"streampulse/internal/alert"
 	"streampulse/internal/config"
+	"streampulse/internal/inspect"
 	"streampulse/internal/metrics"
 )
 
@@ -226,5 +227,102 @@ func TestHandlerServesPageAndState(t *testing.T) {
 	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/nope", nil))
 	if rec.Code != http.StatusNotFound {
 		t.Errorf("GET /nope = %d, want 404", rec.Code)
+	}
+}
+
+// The media column is decided per table, not per row: a row whose capture
+// failed this cycle must still render the cell or its columns shift left out
+// from under the header. The page needs `thumb` and `audio` to be reliably
+// absent-or-present per stream to make that decision.
+func TestFramesSurfacePerStream(t *testing.T) {
+	src := sources(t)
+	frames := inspect.NewFrames(10)
+	frames.Put(inspect.FrameKey("live", "video/v0"), inspect.Frame{
+		JPEG: []byte("\xff\xd8jpeg"), At: time.Unix(1700000000, 0),
+	})
+	frames.Put(inspect.FrameKey("live", "audio/en/a0"), inspect.Frame{
+		HasAudio: true, PeakDBFS: -12, MeanDBFS: -24, At: time.Unix(1700000000, 0),
+	})
+	src.Frames = frames
+
+	st := Build(src)
+	byName := map[string]Stream{}
+	for _, s := range st.Targets[1].Streams {
+		byName[s.Name] = s
+	}
+
+	video := byName["video/v0"]
+	if video.Thumb == "" || !strings.Contains(video.Thumb, "target=live") {
+		t.Errorf("video stream thumb = %q", video.Thumb)
+	}
+	// The capture time is in the URL so a browser fetches the new picture
+	// rather than the one it already has.
+	if !strings.Contains(video.Thumb, "t=1700000000000000000") {
+		t.Errorf("thumb URL should carry the capture time, got %q", video.Thumb)
+	}
+	if video.Audio != nil {
+		t.Errorf("a video-only stream should report no audio, got %+v", video.Audio)
+	}
+
+	audio := byName["audio/en/a0"]
+	if audio.Thumb != "" {
+		t.Errorf("an audio stream has no picture, got %q", audio.Thumb)
+	}
+	if audio.Audio == nil || audio.Audio.PeakDBFS != -12 || audio.Audio.Silent {
+		t.Errorf("audio level = %+v, want -12 dBFS and not silent", audio.Audio)
+	}
+}
+
+func TestSilentAudioIsFlaggedInTheAPI(t *testing.T) {
+	src := sources(t)
+	frames := inspect.NewFrames(10)
+	frames.Put(inspect.FrameKey("live", "audio/en/a0"), inspect.Frame{
+		HasAudio: true, PeakDBFS: -91, MeanDBFS: -91,
+	})
+	src.Frames = frames
+
+	for _, s := range Build(src).Targets[1].Streams {
+		if s.Name == "audio/en/a0" && (s.Audio == nil || !s.Audio.Silent) {
+			t.Errorf("digital silence should be flagged, got %+v", s.Audio)
+		}
+	}
+}
+
+// No capture configured means no pictures and no crash.
+func TestNoFramesStoreIsFine(t *testing.T) {
+	st := Build(sources(t)) // Frames is nil
+	for _, tg := range st.Targets {
+		for _, s := range tg.Streams {
+			if s.Thumb != "" || s.Audio != nil {
+				t.Errorf("%s reported media with no frame store", s.Name)
+			}
+		}
+	}
+}
+
+// The frame endpoint serves the bytes, and 404s for a stream that has none.
+func TestFrameEndpoint(t *testing.T) {
+	src := sources(t)
+	frames := inspect.NewFrames(10)
+	frames.Put(inspect.FrameKey("live", "video/v0"), inspect.Frame{JPEG: []byte("\xff\xd8jpeg")})
+	src.Frames = frames
+	h := Handler(src)
+
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/frame?target=live&variant=video/v0", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET frame = %d", rec.Code)
+	}
+	if ct := rec.Header().Get("Content-Type"); ct != "image/jpeg" {
+		t.Errorf("content type = %q", ct)
+	}
+	if rec.Body.String() != "\xff\xd8jpeg" {
+		t.Errorf("body = %q", rec.Body.String())
+	}
+
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/frame?target=live&variant=nope", nil))
+	if rec.Code != http.StatusNotFound {
+		t.Errorf("a stream with no frame should 404, got %d", rec.Code)
 	}
 }

@@ -23,10 +23,10 @@ import (
 // look exactly like corruption -- reporting those would mean every DRM stream
 // permanently failing a check it cannot pass.
 func (p *Prober) inspectMedia(ctx context.Context, t config.Target, variant, url string,
-	d inspect.Declared, encrypted bool, byteRange span) {
+	d inspect.Declared, encrypted bool, byteRange span) *inspect.Media {
 
 	if !t.Inspect || !p.inspector.Available() || url == "" || encrypted {
-		return
+		return nil
 	}
 	labels := map[string]string{"target": t.Name, "variant": variant}
 
@@ -38,7 +38,7 @@ func (p *Prober) inspectMedia(ctx context.Context, t config.Target, variant, url
 	if err != nil {
 		// A fetch failure here is the segment checks' business, not this
 		// one's; reporting it twice under two names helps nobody.
-		return
+		return nil
 	}
 	defer os.Remove(path)
 
@@ -50,7 +50,7 @@ func (p *Prober) inspectMedia(ctx context.Context, t config.Target, variant, url
 		// than a segment 404: the bytes arrived and are not usable.
 		p.emit(t.Name, variant, alert.Critical, "media_unreadable",
 			"ffprobe could not read the media: "+err.Error()+" ("+url+")")
-		return
+		return nil
 	}
 	p.reg.SetGauge("streampulse_media_readable", helpMediaReadable, 1, labels)
 	p.reg.SetGauge("streampulse_media_streams", helpMediaStreams, float64(len(media.Streams)), labels)
@@ -58,6 +58,77 @@ func (p *Prober) inspectMedia(ctx context.Context, t config.Target, variant, url
 	for _, diff := range inspect.Compare(d, media) {
 		p.emit(t.Name, variant, alert.Warning, diff.Kind, diff.Detail)
 	}
+	return media
+}
+
+// capture pulls one frame and one audio level out of the newest segment, for
+// the picture and the meter in the web UI.
+//
+// It has to concatenate the initialisation segment with a media segment before
+// anything can be decoded: an fMP4 media segment carries samples and no
+// description of them, so on its own it is undecodable. A transport stream
+// segment is self-describing and needs no prefix.
+func (p *Prober) capture(ctx context.Context, t config.Target, variant string,
+	initURL string, initRange span, segmentURL string, media *inspect.Media) {
+
+	if !t.Thumbnails || !p.inspector.CanCapture() || segmentURL == "" || media == nil {
+		return
+	}
+	labels := map[string]string{"target": t.Name, "variant": variant}
+
+	cctx, cancel := context.WithTimeout(ctx, p.inspectFor)
+	defer cancel()
+
+	path, err := p.download(cctx, t, segmentURL, span{})
+	if err != nil {
+		return
+	}
+	defer os.Remove(path)
+
+	if initURL != "" {
+		if err := p.prefix(cctx, t, initURL, initRange, path); err != nil {
+			return
+		}
+	}
+
+	frame := inspect.Frame{At: p.now().UTC()}
+	if media.Video() != nil {
+		jpeg, err := p.inspector.Thumbnail(cctx, path, 320)
+		if err == nil {
+			frame.JPEG = jpeg
+		}
+	}
+	if media.Audio() != nil {
+		mean, peak, err := p.inspector.AudioLevel(cctx, path)
+		if err == nil {
+			frame.MeanDBFS, frame.PeakDBFS, frame.HasAudio = mean, peak, true
+			p.reg.SetGauge("streampulse_audio_peak_dbfs", helpAudioPeak, peak, labels)
+			p.reg.SetGauge("streampulse_audio_mean_dbfs", helpAudioMean, mean, labels)
+		}
+	}
+	if frame.JPEG != nil || frame.HasAudio {
+		p.frames.Put(inspect.FrameKey(t.Name, variant), frame)
+	}
+}
+
+// prefix puts the initialisation segment in front of the media segment, in
+// place, so ffmpeg is handed one decodable file.
+func (p *Prober) prefix(ctx context.Context, t config.Target, initURL string, r span, mediaPath string) error {
+	initPath, err := p.download(ctx, t, initURL, r)
+	if err != nil {
+		return err
+	}
+	defer os.Remove(initPath)
+
+	init, err := os.ReadFile(initPath)
+	if err != nil {
+		return err
+	}
+	body, err := os.ReadFile(mediaPath)
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(mediaPath, append(init, body...), 0o600)
 }
 
 // inspectRepresentation is the DASH entry point: a representation states its
@@ -73,9 +144,13 @@ func (p *Prober) inspectRepresentation(ctx context.Context, t config.Target,
 	if r.Addressing() == dash.AddressingBase {
 		return
 	}
-	p.inspectMedia(ctx, t, variant, r.InitURI(), inspect.Declared{
+	media := p.inspectMedia(ctx, t, variant, r.InitURI(), inspect.Declared{
 		Codecs: r.Codecs, Width: r.Width, Height: r.Height,
 	}, len(r.ContentProtections) > 0, span{})
+
+	if segs := r.SegmentsAt(p.now().UTC()); len(segs) > 0 {
+		p.capture(ctx, t, variant, r.InitURI(), span{}, segs[len(segs)-1].URI, media)
+	}
 }
 
 // span is a byte range of a resource, as EXT-X-MAP BYTERANGE states one.

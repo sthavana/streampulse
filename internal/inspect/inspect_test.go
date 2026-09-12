@@ -158,3 +158,50 @@ func mustNew(t *testing.T, path string) *Inspector {
 	}
 	return i
 }
+
+// volumedetect writes its measurement to stderr among ffmpeg's ordinary
+// chatter, so the parse has to find it in noise rather than read a clean value.
+func TestAudioLevelParsesVolumedetectOutput(t *testing.T) {
+	i := &Inspector{ffmpeg: stubFFprobe(t, `cat >&2 <<'OUT'
+Input #0, mpegts, from 'seg.ts':
+  Duration: 00:00:04.00, start: 1.400000, bitrate: 1200 kb/s
+[Parsed_volumedetect_0 @ 0x7f8] n_samples: 192000
+[Parsed_volumedetect_0 @ 0x7f8] mean_volume: -23.4 dB
+[Parsed_volumedetect_0 @ 0x7f8] max_volume: -3.1 dB
+OUT`)}
+	mean, peak, err := i.AudioLevel(context.Background(), "seg.ts")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if mean != -23.4 || peak != -3.1 {
+		t.Errorf("mean/peak = %v/%v, want -23.4/-3.1", mean, peak)
+	}
+}
+
+func TestAudioLevelReportsWhenNothingWasMeasured(t *testing.T) {
+	i := &Inspector{ffmpeg: stubFFprobe(t, `echo "Stream contains no audio" >&2`)}
+	if _, _, err := i.AudioLevel(context.Background(), "seg.ts"); err == nil {
+		t.Error("expected an error when no level was reported")
+	}
+}
+
+func TestThumbnailReturnsTheFrameBytes(t *testing.T) {
+	i := &Inspector{ffmpeg: stubFFprobe(t, `printf '\xff\xd8\xff\xe0JPEGDATA'`)}
+	b, err := i.Thumbnail(context.Background(), "seg.ts", 320)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(b) < 4 || b[0] != 0xff || b[1] != 0xd8 {
+		t.Errorf("expected JPEG bytes, got %q", b)
+	}
+}
+
+// An empty frame is a failure, not an empty picture: rendering a zero-byte
+// image would show a broken placeholder in the UI and look like a bug in the
+// page rather than in the stream.
+func TestThumbnailRejectsAnEmptyResult(t *testing.T) {
+	i := &Inspector{ffmpeg: stubFFprobe(t, `true`)}
+	if _, err := i.Thumbnail(context.Background(), "seg.ts", 320); err == nil {
+		t.Error("expected an error when ffmpeg produced nothing")
+	}
+}

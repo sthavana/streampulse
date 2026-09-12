@@ -40,6 +40,8 @@ const (
 	helpInspectSeconds = "Time ffprobe took to read the media"
 	helpMediaReadable  = "1 if ffprobe could read the media, 0 if not"
 	helpMediaStreams   = "Elementary streams ffprobe found in the media"
+	helpAudioPeak      = "Peak audio level of the sampled segment, dBFS"
+	helpAudioMean      = "Mean audio level of the sampled segment, dBFS"
 	helpStreamLive     = "1 if the stream is live, 0 if it is complete (EXT-X-ENDLIST, or MPD type=static)"
 )
 
@@ -51,7 +53,9 @@ type Prober struct {
 	// inspection check is skipped.
 	inspector  *inspect.Inspector
 	inspectFor time.Duration
-	now        func() time.Time // injectable so the cross-poll checks are testable
+	// frames holds the latest picture and audio level per stream, for the UI.
+	frames *inspect.Frames
+	now    func() time.Time // injectable so the cross-poll checks are testable
 
 	mu    sync.Mutex
 	state map[string]*plState   // keyed by media-playlist URL
@@ -83,8 +87,12 @@ func New(reg *metrics.Registry, n alert.Notifier) *Prober {
 		edges:      make(map[string]*edgeState),
 		inspector:  &inspect.Inspector{},
 		inspectFor: 20 * time.Second,
+		frames:     inspect.NewFrames(200),
 	}
 }
+
+// Frames exposes the latest captured picture per stream, for the web UI.
+func (p *Prober) Frames() *inspect.Frames { return p.frames }
 
 // SetInspector enables media inspection. Passing a disabled inspector, or
 // never calling this, leaves every other check untouched.
@@ -251,13 +259,19 @@ func (p *Prober) checkMedia(ctx context.Context, t config.Target, mediaURL, vari
 			initURL := resolveURL(mediaURL, mp.URI)
 			p.probeInit(ctx, t, variant, initURL, offset)
 			length, _ := mp.Length()
-			p.inspectMedia(ctx, t, variant, initURL, d, pl.Encrypted(), span{offset, length})
+			media := p.inspectMedia(ctx, t, variant, initURL, d, pl.Encrypted(), span{offset, length})
+			if n := len(pl.Segments); n > 0 {
+				p.capture(ctx, t, variant, initURL, span{offset, length},
+					resolveURL(mediaURL, pl.Segments[n-1].URI), media)
+			}
 		}
 		if len(pl.Maps) == 0 && len(pl.Segments) > 0 {
 			// Transport stream: no init segment, and a TS segment is
 			// self-describing, so the newest one is what gets inspected.
 			last := pl.Segments[len(pl.Segments)-1]
-			p.inspectMedia(ctx, t, variant, resolveURL(mediaURL, last.URI), d, pl.Encrypted(), span{})
+			segURL := resolveURL(mediaURL, last.URI)
+			media := p.inspectMedia(ctx, t, variant, segURL, d, pl.Encrypted(), span{})
+			p.capture(ctx, t, variant, "", span{}, segURL, media)
 		}
 		urls := make([]string, len(pl.Segments))
 		for i, s := range pl.Segments {

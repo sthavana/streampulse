@@ -12,12 +12,15 @@ import (
 	"embed"
 	"encoding/json"
 	"net/http"
+	"net/url"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
 	"streampulse/internal/alert"
 	"streampulse/internal/config"
+	"streampulse/internal/inspect"
 	"streampulse/internal/metrics"
 )
 
@@ -29,9 +32,12 @@ type Sources struct {
 	Registry *metrics.Registry
 	Tracker  *alert.Tracker
 	Recorder *alert.Recorder
-	Targets  []config.Target
-	Started  time.Time
-	Version  string
+	// Frames is the latest picture and audio level per stream, when frame
+	// capture is enabled. Nil is fine and simply means no pictures.
+	Frames  *inspect.Frames
+	Targets []config.Target
+	Started time.Time
+	Version string
 }
 
 // State is the whole page, as JSON.
@@ -74,6 +80,22 @@ type Stream struct {
 	Live    *bool  `json:"live,omitempty"`
 	Metrics Values `json:"metrics"`
 	Firing  int    `json:"firing"`
+	// Thumb is the URL of the latest captured frame, empty when there is
+	// none. It carries the capture time so a browser fetches the new picture
+	// rather than the one it already has.
+	Thumb string `json:"thumb,omitempty"`
+	// Audio is the level of the sampled segment, absent when the stream has
+	// no audio or capture is off.
+	Audio *AudioLevel `json:"audio,omitempty"`
+}
+
+// AudioLevel is a measurement, not a verdict: whether a level is a fault
+// depends on the programme, so the number is reported and the judgement left
+// to whoever knows it.
+type AudioLevel struct {
+	PeakDBFS float64 `json:"peak_dbfs"`
+	MeanDBFS float64 `json:"mean_dbfs"`
+	Silent   bool    `json:"silent"`
 }
 
 // Values is the metric set for one row, keyed by the metric name with the
@@ -89,6 +111,18 @@ func Handler(s Sources) http.Handler {
 		enc := json.NewEncoder(w)
 		enc.SetIndent("", "  ")
 		_ = enc.Encode(Build(s))
+	})
+	mux.HandleFunc("/api/frame", func(w http.ResponseWriter, r *http.Request) {
+		fr, ok := s.Frames.Get(inspect.FrameKey(r.URL.Query().Get("target"), r.URL.Query().Get("variant")))
+		if !ok || len(fr.JPEG) == 0 {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "image/jpeg")
+		// The URL carries the capture time, so the picture at it never
+		// changes and may be cached hard.
+		w.Header().Set("Cache-Control", "public, max-age=3600, immutable")
+		_, _ = w.Write(fr.JPEG)
 	})
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/" {
@@ -189,6 +223,20 @@ func Build(s Sources) State {
 			if stream.Up == nil && vals["segment_count"] > 0 {
 				up := true
 				stream.Up = &up
+			}
+			if s.Frames != nil {
+				if fr, ok := s.Frames.Get(inspect.FrameKey(t.Name, variant)); ok {
+					if len(fr.JPEG) > 0 {
+						stream.Thumb = "api/frame?target=" + url.QueryEscape(t.Name) +
+							"&variant=" + url.QueryEscape(variant) +
+							"&t=" + strconv.FormatInt(fr.At.UnixNano(), 10)
+					}
+					if fr.HasAudio {
+						stream.Audio = &AudioLevel{
+							PeakDBFS: fr.PeakDBFS, MeanDBFS: fr.MeanDBFS, Silent: fr.Silent(),
+						}
+					}
+				}
 			}
 			tv.Streams = append(tv.Streams, stream)
 		}
