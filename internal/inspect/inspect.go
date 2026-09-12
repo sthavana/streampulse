@@ -19,7 +19,23 @@ import (
 	"os/exec"
 	"strconv"
 	"strings"
+	"time"
 )
+
+// waitDelay bounds how long a cancelled command is given to let go of its
+// pipes.
+//
+// exec.CommandContext kills the process when the context ends, but Output and
+// Run still block on the stdout pipe afterwards -- and if the binary spawned a
+// child that inherited that pipe, the parent dying does not close it and the
+// call hangs long past the timeout it was given. WaitDelay closes the pipes
+// and gives up.
+//
+// This is not theoretical and it is not only about tests: an ffmpeg that wedges
+// would hold a probe goroutine open indefinitely. Linux CI found it where
+// macOS did not, because the two /bin/sh differ over whether they exec the
+// last command in a script or fork it.
+const waitDelay = 2 * time.Second
 
 // Inspector runs ffprobe. The zero value is a disabled inspector, which is
 // what makes the dependency optional: callers ask Available and skip.
@@ -106,6 +122,7 @@ func (i *Inspector) Probe(ctx context.Context, path string) (*Media, error) {
 	}
 
 	cmd := exec.CommandContext(ctx, i.ffprobe, args...)
+	cmd.WaitDelay = waitDelay
 	var stderr strings.Builder
 	cmd.Stderr = &stderr
 	out, err := cmd.Output()

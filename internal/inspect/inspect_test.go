@@ -26,6 +26,25 @@ func stubFFprobe(t *testing.T, script string) string {
 	return path
 }
 
+// stubBinary is stubFFprobe for a command whose output is bytes rather than
+// text. The bytes go in a file for the stub to cat: printf is not portable
+// here -- bash understands \xNN escapes and dash, which is /bin/sh on most
+// Linux, does not, so the escapes arrive as literal backslashes.
+func stubBinary(t *testing.T, out []byte) string {
+	t.Helper()
+	dir := t.TempDir()
+	data := filepath.Join(dir, "out.bin")
+	if err := os.WriteFile(data, out, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, "stub")
+	script := "#!/bin/sh\ncat " + data + "\n"
+	if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
 const goodOutput = `cat <<'JSON'
 {"streams":[
  {"index":0,"codec_name":"h264","codec_type":"video","profile":"High","width":1280,"height":720,"sample_aspect_ratio":"1:1"},
@@ -186,7 +205,7 @@ func TestAudioLevelReportsWhenNothingWasMeasured(t *testing.T) {
 }
 
 func TestThumbnailReturnsTheFrameBytes(t *testing.T) {
-	i := &Inspector{ffmpeg: stubFFprobe(t, `printf '\xff\xd8\xff\xe0JPEGDATA'`)}
+	i := &Inspector{ffmpeg: stubBinary(t, []byte{0xff, 0xd8, 0xff, 0xe0, 'J', 'P', 'G'})}
 	b, err := i.Thumbnail(context.Background(), "seg.ts", 320)
 	if err != nil {
 		t.Fatal(err)

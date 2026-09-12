@@ -1,4 +1,4 @@
-.PHONY: build run test vet fmt check docker docker-full compose-up compose-down clean
+.PHONY: build run test vet fmt check check-linux docker docker-full compose-up compose-down clean
 
 build:
 	go build -o bin/prober ./cmd/prober
@@ -22,6 +22,12 @@ check:
 
 fmt:
 	gofmt -w .
+
+# CI runs on Linux, where /bin/sh is dash and process groups behave
+# differently. Two bugs have reached CI that macOS could not reproduce, so this
+# runs the same suite in the same environment before pushing.
+check-linux:
+	docker run --rm -v "$$PWD":/src -w /src golang:1.22 go test -race ./...
 
 docker:
 	docker build -t streampulse:dev .

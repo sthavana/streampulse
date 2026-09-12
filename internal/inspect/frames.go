@@ -125,6 +125,7 @@ func (i *Inspector) Thumbnail(ctx context.Context, path string, width int) ([]by
 		"-vf", "scale="+strconv.Itoa(width)+":-2",
 		"-f", "mjpeg", "-",
 	)
+	cmd.WaitDelay = waitDelay
 	var stderr strings.Builder
 	cmd.Stderr = &stderr
 	out, err := cmd.Output()
@@ -162,6 +163,7 @@ func (i *Inspector) AudioLevel(ctx context.Context, path string) (mean, peak flo
 		"-vn", "-sn", "-dn",
 		"-f", "null", "-",
 	)
+	cmd.WaitDelay = waitDelay
 	// volumedetect reports on stderr, which is also where errors go.
 	var stderr strings.Builder
 	cmd.Stderr = &stderr
