@@ -26,6 +26,7 @@ import (
 	"streampulse/internal/inspect"
 	"streampulse/internal/metrics"
 	"streampulse/internal/probe"
+	"streampulse/internal/supervisor"
 	"streampulse/internal/web"
 )
 
@@ -104,6 +105,9 @@ func main() {
 	pr.SetVantage(cfg.Vantage)
 	pr.SetContentThresholds(cfg.Inspection.BlackFraction, cfg.Inspection.FreezeFraction)
 
+	// Before the web handler, which reads the live target set from it.
+	sup := supervisor.New(pr)
+
 	mux := http.NewServeMux()
 	mux.Handle("/metrics", reg.Handler())
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
@@ -112,7 +116,8 @@ func main() {
 	mux.Handle("/", web.Handler(web.Sources{
 		Registry: reg, Tracker: tracker, Recorder: recorder, Frames: pr.Frames(),
 		Vantage: cfg.Vantage,
-		Targets: cfg.Targets, Started: time.Now(),
+		Targets: sup.Targets,
+		Started: time.Now(),
 	}))
 	srv := &http.Server{Addr: cfg.MetricsAddr, Handler: mux}
 	go func() {
@@ -130,12 +135,35 @@ func main() {
 		defer wg.Done()
 		runSweeper(ctx, tracker, cfg.Alerting.Sweep())
 	}()
-	for _, t := range cfg.Targets {
+	sup.Sync(ctx, cfg.Targets)
+
+	// Re-read the config so a stream can be added, removed or retimed without
+	// restarting. A restart is not free for a monitoring tool: it drops every
+	// in-flight probe and re-derives the cross-poll state that freeze and
+	// rollback detection depend on.
+	if every := cfg.Reload(); every > 0 {
+		log.Printf("watching %s for changes every %s", *cfgPath, every)
 		wg.Add(1)
-		go func(t config.Target) {
+		go func() {
 			defer wg.Done()
-			runTarget(ctx, pr, t)
-		}(t)
+			config.Watch(ctx, *cfgPath, every, func(next *config.Config, err error) {
+				if err != nil {
+					// A saved typo must not take monitoring down. The previous
+					// config stays in force and the operator gets told why.
+					log.Printf("config reload failed, keeping the running one: %v", err)
+					return
+				}
+				if ch := sup.Sync(ctx, next.Targets); !ch.Empty() {
+					log.Printf("config reloaded: %s", ch)
+				}
+				schedule, err := next.Schedule()
+				if err != nil {
+					log.Printf("config reload: maintenance windows unchanged: %v", err)
+					return
+				}
+				tracker.SetSchedule(schedule)
+			})
+		}()
 	}
 
 	sig := make(chan os.Signal, 1)
@@ -147,6 +175,7 @@ func main() {
 	shutdownCtx, sc := context.WithTimeout(context.Background(), 5*time.Second)
 	defer sc()
 	_ = srv.Shutdown(shutdownCtx)
+	sup.Stop()
 	wg.Wait()
 
 	// Last thing, after the probers have stopped, so the snapshot reflects the
@@ -179,25 +208,4 @@ func runSweeper(ctx context.Context, tr *alert.Tracker, every time.Duration) {
 			tr.Sweep()
 		}
 	}
-}
-
-func runTarget(ctx context.Context, pr *probe.Prober, t config.Target) {
-	log.Printf("probing %q every %s: %s", t.Name, t.Interval(), t.URL)
-	probeOnce(ctx, pr, t) // run immediately, then on the ticker
-	ticker := time.NewTicker(t.Interval())
-	defer ticker.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-ticker.C:
-			probeOnce(ctx, pr, t)
-		}
-	}
-}
-
-func probeOnce(ctx context.Context, pr *probe.Prober, t config.Target) {
-	c, cancel := context.WithTimeout(ctx, 30*time.Second)
-	defer cancel()
-	pr.ProbeTarget(c, t)
 }

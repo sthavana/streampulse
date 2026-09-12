@@ -14,6 +14,12 @@ import (
 	"streampulse/internal/metrics"
 )
 
+// fixed is a target set that does not change, which is what a test wants and
+// what the running prober deliberately is not.
+func fixed(ts ...config.Target) func() []config.Target {
+	return func() []config.Target { return ts }
+}
+
 func sources(t *testing.T) Sources {
 	t.Helper()
 	reg := metrics.New()
@@ -33,10 +39,10 @@ func sources(t *testing.T) Sources {
 
 	return Sources{
 		Registry: reg, Tracker: tr, Recorder: alert.NewRecorder(10),
-		Targets: []config.Target{
-			{Name: "live", URL: "https://example.com/live.mpd", Type: "dash", IntervalSeconds: 6},
-			{Name: "dead", URL: "http://127.0.0.1:1/x.m3u8"},
-		},
+		Targets: fixed(
+			config.Target{Name: "live", URL: "https://example.com/live.mpd", Type: "dash", IntervalSeconds: 6},
+			config.Target{Name: "dead", URL: "http://127.0.0.1:1/x.m3u8"},
+		),
 		Started: time.Now().Add(-90 * time.Second),
 	}
 }
@@ -136,7 +142,7 @@ func TestEmptyListsAreNotNull(t *testing.T) {
 	}
 
 	// And a configured target with nothing probed yet still gets a list.
-	st = Build(Sources{Registry: metrics.New(), Targets: []config.Target{{Name: "x"}}})
+	st = Build(Sources{Registry: metrics.New(), Targets: fixed(config.Target{Name: "x"})})
 	b, _ = json.Marshal(st)
 	if !strings.Contains(string(b), `"streams":[]`) {
 		t.Errorf("a target with no streams should carry [], got %s", b)
@@ -324,5 +330,24 @@ func TestFrameEndpoint(t *testing.T) {
 	h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/frame?target=live&variant=nope", nil))
 	if rec.Code != http.StatusNotFound {
 		t.Errorf("a stream with no frame should 404, got %d", rec.Code)
+	}
+}
+
+// The UI reads the live target set, so a stream added by a config reload
+// appears without a restart -- and one removed stops being listed.
+func TestTargetsAreReadLive(t *testing.T) {
+	current := []config.Target{{Name: "a", URL: "http://a/x.m3u8"}}
+	src := Sources{Registry: metrics.New(), Targets: func() []config.Target { return current }}
+
+	if got := Build(src).Targets; len(got) != 1 || got[0].Name != "a" {
+		t.Fatalf("targets = %+v", got)
+	}
+	current = append(current, config.Target{Name: "b", URL: "http://b/x.m3u8"})
+	if got := Build(src).Targets; len(got) != 2 {
+		t.Errorf("a target added after startup did not appear: %+v", got)
+	}
+	current = nil
+	if got := Build(src).Targets; len(got) != 0 {
+		t.Errorf("a removed target is still listed: %+v", got)
 	}
 }

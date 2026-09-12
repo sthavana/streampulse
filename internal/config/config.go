@@ -225,12 +225,22 @@ type Config struct {
 	// Vantage names where this prober runs, for a fleet watching the same
 	// streams from several places -- which is how a regional CDN fault
 	// becomes visible at all. Empty adds no label and changes nothing.
-	Vantage      string              `json:"vantage,omitempty"`
-	SlackWebhook string              `json:"slack_webhook,omitempty"`
-	Alerting     Alerting            `json:"alerting"`
-	Inspection   Inspection          `json:"inspection,omitempty"`
-	Maintenance  []MaintenanceWindow `json:"maintenance,omitempty"`
-	Targets      []Target            `json:"targets"`
+	Vantage string `json:"vantage,omitempty"`
+	// ReloadSeconds is how often the config file is re-read so that targets
+	// can be added, removed or changed without restarting. Unset means every
+	// 10s; negative turns it off.
+	//
+	// Only the target list and the maintenance windows are applied on reload.
+	// Everything else -- the listen address, the vantage, the inspection
+	// binaries, the alerting timings -- is read once at startup, because
+	// changing them under a running process ranges from impossible to merely
+	// confusing.
+	ReloadSeconds int                 `json:"reload_seconds,omitempty"`
+	SlackWebhook  string              `json:"slack_webhook,omitempty"`
+	Alerting      Alerting            `json:"alerting"`
+	Inspection    Inspection          `json:"inspection,omitempty"`
+	Maintenance   []MaintenanceWindow `json:"maintenance,omitempty"`
+	Targets       []Target            `json:"targets"`
 }
 
 // Schedule builds the runtime maintenance schedule, validating every window.
@@ -276,7 +286,18 @@ func Load(path string) (*Config, error) {
 	if len(c.Targets) == 0 {
 		return nil, fmt.Errorf("config has no targets")
 	}
+	seen := make(map[string]bool, len(c.Targets))
 	for _, t := range c.Targets {
+		if t.Name == "" {
+			return nil, fmt.Errorf("every target needs a name")
+		}
+		// The name identifies a target in its metrics, in its incidents, and
+		// when the config is reloaded and the running set is diffed against
+		// the new one. Two targets sharing a name would collide in all three.
+		if seen[t.Name] {
+			return nil, fmt.Errorf("two targets are both named %q", t.Name)
+		}
+		seen[t.Name] = true
 		if (t.Inspect || t.Thumbnails) && t.SegmentSample <= 0 {
 			return nil, fmt.Errorf("target %q sets inspect/thumbnails but segment_sample is 0, so no media would ever be read", t.Name)
 		}

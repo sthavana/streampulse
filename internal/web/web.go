@@ -34,8 +34,11 @@ type Sources struct {
 	Recorder *alert.Recorder
 	// Frames is the latest picture and audio level per stream, when frame
 	// capture is enabled. Nil is fine and simply means no pictures.
-	Frames  *inspect.Frames
-	Targets []config.Target
+	Frames *inspect.Frames
+	// Targets returns the target set as it is now. A function rather than a
+	// slice, because the set changes when the config is reloaded and a
+	// snapshot taken at startup would quietly go stale.
+	Targets func() []config.Target
 	Started time.Time
 	Version string
 	// Vantage names where this prober observes from, shown in the header so a
@@ -199,7 +202,11 @@ func Build(s Sources) State {
 		}
 	}
 
-	for _, t := range s.Targets {
+	targets := []config.Target{}
+	if s.Targets != nil {
+		targets = s.Targets()
+	}
+	for _, t := range targets {
 		rows := byTarget[t.Name]
 		tv := Target{
 			Name: t.Name, URL: t.URL, Format: format(t), Interval: t.Interval().String(),

@@ -137,6 +137,7 @@ web UI above answers the question those cannot: what is happening *right now*.
 [DASH](#dash) ·
 [which layer broke](#which-layer-broke-cache-attribution) ·
 [multi-vantage](#multi-vantage) ·
+[reload without restart](#adding-a-stream-without-a-restart) ·
 [transport streams](#transport-stream-integrity) ·
 [media inspection](#looking-inside-the-media-optional)
 
@@ -495,6 +496,56 @@ the judgement to the check layer: a malformed `@suggestedPresentationDelay`
 leaves that one attribute unset rather than costing the whole manifest, and a
 dynamic MPD with no `@availabilityStartTime` is read as fully available rather
 than as empty. Deciding that either is *wrong* is a check's job, not a parser's.
+
+## Adding a stream without a restart
+
+The config file is re-read while the prober runs. Add a target, remove one,
+change an interval — save the file and it takes effect within a few seconds,
+with no restart and no API:
+
+```json
+"reload_seconds": 10
+```
+
+Unset means every 10s; negative turns it off.
+
+A restart is not free for a monitoring tool. It drops every probe in flight and
+re-derives the cross-poll state that freeze, rollback and key-rotation
+detection are built on, so the first cycle after one is blind to exactly the
+faults those checks exist for. Watching one more channel should not cost that.
+
+**A saved typo does not take monitoring down.** A config that fails to parse or
+validate is logged and ignored, and the running one stays in force:
+
+```
+config reloaded: added unified-live-hls
+config reload failed, keeping the running one: invalid character 'n' ...
+config reloaded: removed unified-live-dash
+```
+
+Only **targets and maintenance windows** are applied on reload. The listen
+address, the vantage, the inspection binaries and the alerting timings are read
+once at startup, because changing those under a running process ranges from
+impossible to merely confusing.
+
+Untouched targets are left alone. A target is restarted only when something
+about it actually changed — its interval, its URL, any of its check settings —
+because a needless restart would throw away that target's cross-poll state for
+nothing. Targets are identified by name, which is why the config now refuses
+two with the same one.
+
+Detection is by hashing the file's contents on a timer rather than watching the
+inode. It needs no dependency, and it is indifferent to *how* the file was
+written: an editor renaming a temp file into place, Kubernetes remounting a
+ConfigMap as a new symlink, and a plain in-place write all look the same to a
+hash and all look different to a naive watch.
+
+**There is deliberately no write API.** A form in the browser would mean an
+endpoint that makes this process fetch a URL of the caller's choosing, on a
+port documented as unauthenticated — a prober is an SSRF engine by
+construction, and `streampulse_probe_up` alone turns one into an internal port
+scanner. Editing the file keeps the authority where it already is: whoever can
+deploy.
 
 ## Multi-vantage
 
