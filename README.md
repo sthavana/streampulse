@@ -53,6 +53,17 @@ make compose-up
 | Grafana | http://localhost:3000 |
 | findings | JSON lines on stdout |
 
+Working on it:
+
+```bash
+make check         # gofmt, go vet, and the tests under -race
+make check-linux   # the same suite on Linux, where CI runs it
+```
+
+`check-linux` exists because the difference has bitten twice: CI runs on
+Linux, where `/bin/sh` is dash and a killed process's children keep its pipes
+open, and both times a macOS run reported everything green.
+
 ## What it catches
 
 | | |
