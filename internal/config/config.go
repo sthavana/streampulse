@@ -43,6 +43,13 @@ type Target struct {
 	// decodes it, so it costs considerably more than Inspect and is separate.
 	Thumbnails bool `json:"thumbnails,omitempty"`
 
+	// TSAnalysis reads downloaded transport stream segments for the TR 101 290
+	// Priority 1 faults answerable from one: sync loss, the transport error
+	// indicator, continuity counter breaks, and the absence of a PAT or PMT.
+	// It needs no external binary, so it works in the small image, but it does
+	// download whole segments.
+	TSAnalysis bool `json:"ts_analysis,omitempty"`
+
 	NoCache bool              `json:"no_cache,omitempty"`
 	Headers map[string]string `json:"headers,omitempty"` // extra request headers (auth tokens, CDN overrides)
 
@@ -254,6 +261,12 @@ func Load(path string) (*Config, error) {
 		return nil, fmt.Errorf("config has no targets")
 	}
 	for _, t := range c.Targets {
+		if (t.Inspect || t.Thumbnails) && t.SegmentSample <= 0 {
+			return nil, fmt.Errorf("target %q sets inspect/thumbnails but segment_sample is 0, so no media would ever be read", t.Name)
+		}
+		if t.Thumbnails && c.Inspection.FFmpeg == "" {
+			return nil, fmt.Errorf("target %q sets thumbnails but inspection.ffmpeg is not configured (use \"auto\")", t.Name)
+		}
 		if t.Inspect && c.Inspection.FFprobe == "" {
 			return nil, fmt.Errorf("target %q sets inspect but inspection.ffprobe is not configured (use \"auto\")", t.Name)
 		}

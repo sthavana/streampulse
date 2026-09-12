@@ -42,6 +42,10 @@ const (
 	helpMediaStreams   = "Elementary streams ffprobe found in the media"
 	helpAudioPeak      = "Peak audio level of the sampled segment, dBFS"
 	helpAudioMean      = "Mean audio level of the sampled segment, dBFS"
+	helpTSAligned      = "1 if the sampled segment aligns as a transport stream"
+	helpTSPackets      = "Transport stream packets in the sampled segment"
+	helpTSContinuity   = "Continuity counter breaks in the sampled segment"
+	helpTSTransport    = "Packets carrying the transport error indicator"
 	helpStreamLive     = "1 if the stream is live, 0 if it is complete (EXT-X-ENDLIST, or MPD type=static)"
 )
 
@@ -278,6 +282,15 @@ func (p *Prober) checkMedia(ctx context.Context, t config.Target, mediaURL, vari
 			urls[i] = resolveURL(mediaURL, s.URI)
 		}
 		p.sampleSegments(ctx, t, variant, urls, res.cache)
+	}
+
+	// Transport stream analysis stands outside the sampling block: it needs no
+	// external binary and no initialisation segment, so tying it to
+	// segment_sample would make ts_analysis on its own a silent no-op.
+	// A playlist with an EXT-X-MAP is fMP4 and has no transport stream in it.
+	if len(pl.Maps) == 0 && len(pl.Segments) > 0 {
+		last := pl.Segments[len(pl.Segments)-1]
+		p.analyseTransport(ctx, t, variant, resolveURL(mediaURL, last.URI))
 	}
 }
 

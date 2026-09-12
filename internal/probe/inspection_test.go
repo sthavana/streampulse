@@ -224,3 +224,159 @@ func TestOnlyTheDeclaredByteRangeIsDownloaded(t *testing.T) {
 		t.Errorf("downloaded %d bytes for inspection; the whole resource was fetched", served)
 	}
 }
+
+// --- transport stream analysis ---
+
+// tsSegment builds a transport stream segment with n continuity breaks
+// injected into the video PID.
+func tsSegment(breaks int) []byte {
+	var out []byte
+	packet := func(pid uint16, cc byte, pusi bool, body []byte) {
+		p := make([]byte, 188)
+		for i := range p {
+			p[i] = 0xFF
+		}
+		p[0] = 0x47
+		p[1] = byte(pid >> 8 & 0x1F)
+		if pusi {
+			p[1] |= 0x40
+		}
+		p[2] = byte(pid & 0xFF)
+		p[3] = 0x10 | (cc & 0x0F)
+		copy(p[4:], body)
+		out = append(out, p...)
+	}
+	packet(0x0000, 0, true, []byte{
+		0x00, 0x00, 0xB0, 0x0D, 0x00, 0x01, 0xC1, 0x00, 0x00,
+		0x00, 0x01, 0xE0, 0x20, 0x00, 0x00, 0x00, 0x00,
+	})
+	packet(0x0020, 0, true, []byte{
+		0x00, 0x02, 0xB0, 0x12, 0x00, 0x01, 0xC1, 0x00, 0x00, 0xE0, 0x21, 0xF0, 0x00,
+		0x1B, 0xE0, 0x21, 0xF0, 0x00, 0x00, 0x00, 0x00, 0x00,
+	})
+	cc := byte(0)
+	for i := 0; i < 8; i++ {
+		packet(0x0021, cc, i == 0, nil)
+		cc = (cc + 1) & 0x0F
+		if breaks > 0 {
+			cc = (cc + 3) & 0x0F // skip three: packets went missing
+			breaks--
+		}
+	}
+	return out
+}
+
+func tsOrigin(t *testing.T, segment []byte) *httptest.Server {
+	t.Helper()
+	mux := http.NewServeMux()
+	mux.HandleFunc("/media.m3u8", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte("#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:2\n" +
+			"#EXT-X-MEDIA-SEQUENCE:0\n#EXTINF:2.000,\nseg0.ts\n"))
+	})
+	mux.HandleFunc("/seg0.ts", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write(segment)
+	})
+	return httptest.NewServer(mux)
+}
+
+// Packets that went missing are a visible glitch and nothing else in the tool
+// sees them: the manifest is right, the segment is the right length, and it
+// fetches with a 200.
+func TestContinuityErrorsAreReported(t *testing.T) {
+	origin := tsOrigin(t, tsSegment(2))
+	defer origin.Close()
+
+	cap := &capture{}
+	pr := New(metrics.New(), cap)
+	pr.ProbeTarget(context.Background(), config.Target{
+		Name: "ts", URL: origin.URL + "/media.m3u8", TSAnalysis: true,
+	})
+
+	if !cap.has("ts_continuity_errors") {
+		t.Fatalf("missing packets went undetected: %+v", cap.findings)
+	}
+	for _, f := range cap.findings {
+		if f.Check == "ts_continuity_errors" && !strings.Contains(f.Message, "0x0021") {
+			t.Errorf("the finding should name the PID that lost them, got %q", f.Message)
+		}
+	}
+}
+
+func TestCleanTransportStreamIsSilent(t *testing.T) {
+	origin := tsOrigin(t, tsSegment(0))
+	defer origin.Close()
+
+	cap := &capture{}
+	pr := New(metrics.New(), cap)
+	pr.ProbeTarget(context.Background(), config.Target{
+		Name: "ts", URL: origin.URL + "/media.m3u8", TSAnalysis: true,
+	})
+	if len(cap.findings) != 0 {
+		t.Fatalf("a clean transport stream produced %+v", cap.findings)
+	}
+}
+
+// It needs no ffprobe and no initialisation segment, so tying it to
+// segment_sample would make the flag on its own a silent no-op.
+func TestTSAnalysisRunsWithoutSegmentSampling(t *testing.T) {
+	origin := tsOrigin(t, tsSegment(3))
+	defer origin.Close()
+
+	cap := &capture{}
+	pr := New(metrics.New(), cap) // no inspector at all
+	pr.ProbeTarget(context.Background(), config.Target{
+		Name: "ts", URL: origin.URL + "/media.m3u8", TSAnalysis: true, // SegmentSample 0
+	})
+	if !cap.has("ts_continuity_errors") {
+		t.Errorf("ts_analysis alone produced %+v", cap.findings)
+	}
+}
+
+// An fMP4 stream has no transport stream in it. Reporting that absence as a
+// fault would flag every DASH and every modern HLS stream.
+func TestFMP4IsNotAnalysedAsTransportStream(t *testing.T) {
+	origin, _ := fmp4Origin(fmp4Media, nil)
+	defer origin.Close()
+
+	cap := &capture{}
+	pr := New(metrics.New(), cap)
+	pr.ProbeTarget(context.Background(), config.Target{
+		Name: "fmp4", URL: origin.URL + "/media.m3u8", TSAnalysis: true, SegmentSample: 1,
+	})
+	for _, f := range cap.findings {
+		if strings.HasPrefix(f.Check, "ts_") {
+			t.Errorf("an fMP4 stream produced %s: %s", f.Check, f.Message)
+		}
+	}
+}
+
+func TestOffByDefault(t *testing.T) {
+	origin := tsOrigin(t, tsSegment(5))
+	defer origin.Close()
+
+	cap := &capture{}
+	pr := New(metrics.New(), cap)
+	pr.ProbeTarget(context.Background(), config.Target{
+		Name: "ts", URL: origin.URL + "/media.m3u8", // TSAnalysis not set
+	})
+	for _, f := range cap.findings {
+		if strings.HasPrefix(f.Check, "ts_") {
+			t.Errorf("analysis ran on a target that did not ask for it: %s", f.Check)
+		}
+	}
+}
+
+// A CDN serving something that is not a transport stream at all.
+func TestNonTransportStreamSegmentIsReported(t *testing.T) {
+	origin := tsOrigin(t, []byte("<html><body>404</body></html>"))
+	defer origin.Close()
+
+	cap := &capture{}
+	pr := New(metrics.New(), cap)
+	pr.ProbeTarget(context.Background(), config.Target{
+		Name: "ts", URL: origin.URL + "/media.m3u8", TSAnalysis: true,
+	})
+	if !cap.has("ts_sync_loss") {
+		t.Errorf("got %+v, want ts_sync_loss", cap.findings)
+	}
+}

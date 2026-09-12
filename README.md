@@ -18,7 +18,7 @@ the CDN. By then people have already switched off.
 
 StreamPulse probes actively instead, on a tight schedule, from wherever you run
 it. It parses what it gets back the way a player would and reports faults as
-they appear — 42 checks across both formats, deduplicated into incidents
+they appear — 48 checks across both formats, deduplicated into incidents
 so one frozen playlist is one alert rather than 900.
 
 And where it can, it says which layer to look at:
@@ -102,6 +102,7 @@ open, and both times a macOS run reported everything green.
 | **DRM** | unretrievable keys, clear segments on an encrypted stream, malformed PSSH, keys that stopped rotating |
 | **Low latency** | chunked delivery silently degraded to whole-segment buffering, latency past the declared bound |
 | **The media itself** | codec and resolution that disagree with the manifest, declared tracks that are not there; a picture and audio level per stream *(optional, needs ffprobe/ffmpeg)* |
+| **Transport streams** | TR 101 290 P1: sync loss, transport errors, continuity breaks, missing PAT/PMT *(no dependency)* |
 | **Which layer** | origin versus CDN edge, from the cache headers on the response |
 
 Each is a named check with a severity; the tables further down list every one.
@@ -134,6 +135,7 @@ web UI above answers the question those cannot: what is happening *right now*.
 [DRM](#drm-and-ext-x-key) ·
 [DASH](#dash) ·
 [which layer broke](#which-layer-broke-cache-attribution) ·
+[transport streams](#transport-stream-integrity) ·
 [media inspection](#looking-inside-the-media-optional)
 
 **Operating it**
@@ -566,6 +568,54 @@ is the cleanest origin-vs-edge signal available without instrumenting the CDN.
 Probe requests identify themselves as `StreamPulse/0.1 (synthetic prober)`, so
 they can be separated from real viewers in an origin access log.
 
+## Transport stream integrity
+
+TS-based HLS segments are read directly for the TR 101 290 Priority 1 faults
+that are answerable from one:
+
+| Check | Severity | What it catches |
+|---|---|---|
+| `ts_sync_loss` | critical | Segment does not align as a transport stream, or loses sync partway |
+| `ts_truncated` | critical | Byte count is not a whole number of 188-byte packets |
+| `ts_transport_errors` | critical | `transport_error_indicator`: upstream could not correct a packet |
+| `ts_continuity_errors` | critical | Continuity counter breaks -- packets went missing |
+| `ts_pat_missing` / `ts_pmt_missing` | critical | A decoder cannot start without these tables |
+
+```json
+{ "name": "channel-1", "ts_analysis": true, ... }
+```
+
+**No external binary.** This is the one deep check that works in the 9MB image,
+because a transport stream header is four bytes and two short sections, not a
+demuxer. It does download whole segments, so it is off by default.
+
+It applies to transport streams only. Every fMP4 stream -- all of DASH, and
+most modern HLS -- has none, and this abstains for them rather than reporting
+an absence as a fault.
+
+### Why not TSDuck
+
+TSDuck is the right tool for TR 101 290 and this does not pretend otherwise.
+It was tried first, against a real segment, and the answer was no:
+
+- Everything above comes out of the packet header. TSDuck agreed with this
+  parser on every number for that segment -- 786 packets, PMT on PID 32, PCR
+  on 0x0021, 672 video packets, zero errors of each kind.
+- What TSDuck exists for cannot be done here at all. PCR jitter and PTS
+  repetition intervals need a **continuous** stream; no tool can measure them
+  from an isolated segment.
+- Its error analysis is broadcast-shaped. On that healthy segment,
+  `tsanalyze --error-analysis` reported four errors: `No SDT Actual`, `No BAT`,
+  `No TDT`, `No TOT` -- DVB service-information tables a multiplex carries and
+  an HLS segment legitimately never has.
+- It costs a third external binary, a base image change, and a
+  version-and-arch-pinned `.deb` fetched from a GitHub URL at build time.
+
+**When TSDuck would be right:** a multicast input, `tsp -I ip 239.1.1.1:5000`
+off a broadcast network. Then the whole standard becomes measurable and it is a
+second product surface rather than a check. That is a real direction, and a
+much bigger one than this.
+
 ## Looking inside the media (optional)
 
 Every other check in this tool validates the **plumbing**: manifests parse,
@@ -830,6 +880,8 @@ somewhere private, as you would for `/metrics` itself.
 `streampulse_stream_live`, `streampulse_media_readable`,
 `streampulse_media_streams`, `streampulse_inspect_seconds`,
 `streampulse_audio_peak_dbfs`, `streampulse_audio_mean_dbfs`,
+`streampulse_ts_aligned`, `streampulse_ts_packets`,
+`streampulse_ts_continuity_errors`, `streampulse_ts_transport_errors`,
 `streampulse_key_fetch_seconds`,
 `streampulse_incident_active`, `streampulse_incidents_opened_total`,
 `streampulse_incidents_resolved_total`, `streampulse_maintenance_active`,
@@ -950,11 +1002,11 @@ Packages: `hls` and `dash` (manifest parsers), `probe` (prober + checks),
 
 ## Roadmap
 
-- **MPEG-TS / IPTV**: TR 101 290 P1/P2/P3 via TSDuck. Worth being clear that
-  this is a *second input path*, not a deeper layer of the current one: TR 101
-  290 measures a continuous transport stream, usually multicast, where this
-  tool pulls HTTP. The timing measurements that are the point of it -- PCR
-  jitter, PTS repetition intervals -- cannot be taken from isolated segments
+- **Multicast IPTV input**, and with it the rest of TR 101 290. The Priority 1
+  checks answerable from an HTTP segment are
+  [done](#transport-stream-integrity); the timing measurements -- PCR jitter,
+  PTS repetition intervals -- need a continuous stream, which means a new
+  input path and TSDuck behind it
 - **Black and frozen video as checks**: the frame capture already decodes the
   picture, so `blackdetect` and a frame-to-frame comparison are a short step
   from here. Both need a duration threshold to avoid firing on a legitimate
