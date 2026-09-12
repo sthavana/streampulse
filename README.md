@@ -104,6 +104,7 @@ open, and both times a macOS run reported everything green.
 | **The media itself** | codec and resolution that disagree with the manifest, declared tracks that are not there, black or frozen video, silent audio; a picture and level per stream *(optional, needs ffprobe/ffmpeg)* |
 | **Transport streams** | TR 101 290 P1: sync loss, transport errors, continuity breaks, missing PAT/PMT *(no dependency)* |
 | **Which layer** | origin versus CDN edge, from the cache headers on the response |
+| **Which region** | run it in several places; the vantage labels every metric and every incident |
 
 Each is a named check with a severity; the tables further down list every one.
 
@@ -135,6 +136,7 @@ web UI above answers the question those cannot: what is happening *right now*.
 [DRM](#drm-and-ext-x-key) ·
 [DASH](#dash) ·
 [which layer broke](#which-layer-broke-cache-attribution) ·
+[multi-vantage](#multi-vantage) ·
 [transport streams](#transport-stream-integrity) ·
 [media inspection](#looking-inside-the-media-optional)
 
@@ -493,6 +495,36 @@ the judgement to the check layer: a malformed `@suggestedPresentationDelay`
 leaves that one attribute unset rather than costing the whole manifest, and a
 dynamic MPD with no `@availabilityStartTime` is read as fully available rather
 than as empty. Deciding that either is *wrong* is a check's job, not a parser's.
+
+## Multi-vantage
+
+A CDN fault is usually regional. One edge serving a stale manifest while the
+rest are fine reads as perfectly healthy from wherever you happen to probe, and
+the only way to see it is to probe from more than one place.
+
+```json
+"vantage": "eu-west"
+```
+
+Naming a vantage attaches it as a label to every series and makes it part of
+the incident identity. Run the 9MB image in as many places as you have, point
+one Prometheus at all of them, and the same channel becomes:
+
+```
+streampulse_playlist_window_seconds{target="ch1",vantage="eu-west",...} 595.2
+streampulse_playlist_window_seconds{target="ch1",vantage="us-east",...} 593.3
+```
+
+Without it the second prober silently overwrites the first: same series name,
+same labels, last scrape wins.
+
+**The vantage is part of the incident key**, and that is the part that matters
+for alerting. The same channel frozen in Frankfurt and fine in Ohio is two
+facts, not one; collapsing them into a single incident would resolve the real
+one the moment the healthy vantage reported in.
+
+Unset by default, in which case no label is added anywhere and a
+single-prober setup keeps the series identities its dashboards were built on.
 
 ## Which layer broke: cache attribution
 
@@ -1044,7 +1076,6 @@ Packages: `hls` and `dash` (manifest parsers), `probe` (prober + checks),
   [done](#transport-stream-integrity); the timing measurements -- PCR jitter,
   PTS repetition intervals -- need a continuous stream, which means a new
   input path and TSDuck behind it
-- **Multi-vantage probing** (run from several regions; compare)
 - **Cross-layer correlation**: map a QoE symptom to the offending layer
   (started: manifest findings already carry an origin-vs-edge verdict)
 

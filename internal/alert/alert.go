@@ -34,7 +34,11 @@ const (
 // Finding is a single health observation about a target/variant. The last three
 // fields are filled in by the Tracker when a finding becomes a notification.
 type Finding struct {
-	Time      time.Time  `json:"time"`
+	Time time.Time `json:"time"`
+	// Vantage names where this was observed from. Empty on a single-prober
+	// setup, which is why it is omitted rather than defaulted: adding a label
+	// to every series would break dashboards that never asked for one.
+	Vantage   string     `json:"vantage,omitempty"`
 	Target    string     `json:"target"`
 	Variant   string     `json:"variant,omitempty"`
 	Check     string     `json:"check"`

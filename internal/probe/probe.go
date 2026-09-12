@@ -63,6 +63,9 @@ type Prober struct {
 	// frozen before it is worth reporting. freezeFor of 0 disables the check.
 	blackFor  float64
 	freezeFor float64
+	// vantage names where this prober is running, for a fleet watching the
+	// same streams from several places.
+	vantage string
 	// frames holds the latest picture and audio level per stream, for the UI.
 	frames *inspect.Frames
 	now    func() time.Time // injectable so the cross-poll checks are testable
@@ -114,6 +117,10 @@ func (p *Prober) SetInspector(i *inspect.Inspector, timeout time.Duration) {
 		p.inspectFor = timeout
 	}
 }
+
+// SetVantage names where this prober observes from. Empty, the default, adds
+// no label anywhere, so a single-prober setup is unchanged.
+func (p *Prober) SetVantage(name string) { p.vantage = name }
 
 // SetContentThresholds sets what fraction of a segment must be black or frozen
 // before it is reported. Either at 0 disables that check; a negative black
@@ -486,6 +493,9 @@ func (p *Prober) probeStreaming(ctx context.Context, t config.Target, u string) 
 // --- finding delivery ---
 
 func (p *Prober) record(f alert.Finding) {
+	// Stamped here, once, on the single path every finding leaves by. Setting
+	// it at each of the fifty call sites would mean forgetting it at one.
+	f.Vantage = p.vantage
 	p.notifier.Notify(f)
 	p.reg.IncCounter("streampulse_findings_total", "Total findings emitted", map[string]string{
 		"target": f.Target, "variant": f.Variant, "check": f.Check, "severity": string(f.Severity),

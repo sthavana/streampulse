@@ -39,6 +39,10 @@ func main() {
 	}
 
 	reg := metrics.New()
+	if cfg.Vantage != "" {
+		reg.SetConstantLabels(map[string]string{"vantage": cfg.Vantage})
+		log.Printf("observing as vantage %q", cfg.Vantage)
+	}
 
 	// The recorder keeps the last few hundred notifications in memory for the
 	// web UI. It sits in the chain rather than replacing anything: stdout stays
@@ -97,6 +101,7 @@ func main() {
 		log.Printf("frame capture using %s", inspector.FFmpegPath())
 	}
 	pr.SetInspector(inspector, cfg.Inspection.Timeout())
+	pr.SetVantage(cfg.Vantage)
 	pr.SetContentThresholds(cfg.Inspection.BlackFraction, cfg.Inspection.FreezeFraction)
 
 	mux := http.NewServeMux()
@@ -106,6 +111,7 @@ func main() {
 	})
 	mux.Handle("/", web.Handler(web.Sources{
 		Registry: reg, Tracker: tracker, Recorder: recorder, Frames: pr.Frames(),
+		Vantage: cfg.Vantage,
 		Targets: cfg.Targets, Started: time.Now(),
 	}))
 	srv := &http.Server{Addr: cfg.MetricsAddr, Handler: mux}

@@ -554,3 +554,40 @@ func TestNotificationTimestampsAreUTC(t *testing.T) {
 		}
 	}
 }
+
+// The same channel frozen in Frankfurt and fine in Ohio is two facts, not one.
+// Collapsing them into a single incident would resolve the real one the moment
+// the healthy vantage reported in.
+func TestVantageIsPartOfIncidentIdentity(t *testing.T) {
+	out := &sink{}
+	tr := NewTracker(TrackerConfig{ResolveAfter: time.Minute}, out, nil)
+
+	tr.Notify(Finding{Vantage: "eu-west", Target: "ch1", Check: "playlist_stalled", Severity: Critical})
+	tr.Notify(Finding{Vantage: "us-east", Target: "ch1", Check: "playlist_stalled", Severity: Critical})
+
+	if out.len() != 2 {
+		t.Fatalf("got %d notifications, want one per vantage", out.len())
+	}
+	if n := tr.Tracking(); n != 2 {
+		t.Errorf("tracking %d incidents, want 2", n)
+	}
+	// And the same fault from the same place is still one incident.
+	tr.Notify(Finding{Vantage: "eu-west", Target: "ch1", Check: "playlist_stalled", Severity: Critical})
+	if out.len() != 2 {
+		t.Errorf("a repeat from the same vantage produced %d notifications", out.len())
+	}
+}
+
+// A single-prober setup names no vantage, and nothing about it changes.
+func TestNoVantageBehavesAsBefore(t *testing.T) {
+	out := &sink{}
+	tr := NewTracker(TrackerConfig{ResolveAfter: time.Minute}, out, nil)
+	tr.Notify(Finding{Target: "ch1", Check: "no_segments", Severity: Critical})
+	tr.Notify(Finding{Target: "ch1", Check: "no_segments", Severity: Critical})
+	if out.len() != 1 {
+		t.Errorf("got %d notifications, want 1", out.len())
+	}
+	if out.at(0).Vantage != "" {
+		t.Errorf("an unset vantage should stay unset, got %q", out.at(0).Vantage)
+	}
+}

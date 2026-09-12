@@ -38,12 +38,16 @@ type Sources struct {
 	Targets []config.Target
 	Started time.Time
 	Version string
+	// Vantage names where this prober observes from, shown in the header so a
+	// browser tab pointed at the wrong region is obvious.
+	Vantage string
 }
 
 // State is the whole page, as JSON.
 type State struct {
 	Now       time.Time        `json:"now"`
 	UptimeSec float64          `json:"uptime_seconds"`
+	Vantage   string           `json:"vantage,omitempty"`
 	Version   string           `json:"version,omitempty"`
 	Summary   Summary          `json:"summary"`
 	Targets   []Target         `json:"targets"`
@@ -151,7 +155,7 @@ func Build(s Sources) State {
 	// and a page that has to defend against null on every list is a page that
 	// will miss one.
 	st := State{
-		Now: now, Version: s.Version,
+		Now: now, Version: s.Version, Vantage: s.Vantage,
 		Targets:   []Target{},
 		Incidents: []alert.Incident{},
 		Recent:    []alert.Finding{},

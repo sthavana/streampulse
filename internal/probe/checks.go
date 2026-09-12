@@ -167,6 +167,8 @@ func edgeStalenessCheck(now time.Time, t config.Target, variant string, pl *hls.
 
 // --- shared helpers (used across the probe package) ---
 
+// finding builds one observation. The vantage is filled in by the prober on
+// the way out rather than threaded through every call site.
 func finding(now time.Time, t config.Target, variant string, sev alert.Severity, check, msg string) alert.Finding {
 	return alert.Finding{
 		Time: now, Target: t.Name, Variant: variant,

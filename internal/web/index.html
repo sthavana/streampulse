@@ -92,7 +92,7 @@
 <body>
 <div class="wrap">
   <header>
-    <h1>StreamPulse<small id="uptime"></small></h1>
+    <h1>StreamPulse<small id="vantage"></small><small id="uptime"></small></h1>
     <div class="chips" id="chips"></div>
   </header>
   <div id="body"></div>
@@ -252,6 +252,9 @@ function render(s) {
   document.body.classList.remove("stale");
   $("chips").innerHTML = chips(s);
   $("uptime").textContent = s.uptime_seconds ? "up " + secs(s.uptime_seconds) : "";
+  // Named in the header because a tab left open on the wrong region is
+  // otherwise indistinguishable from the right one.
+  $("vantage").textContent = s.vantage ? "from " + s.vantage : "";
   $("body").innerHTML =
     `<h2>Incidents</h2>${incidents(s.incidents || [])}` +
     `<h2>Targets</h2>${(s.targets || []).map(target).join("") ||

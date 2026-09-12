@@ -25,6 +25,11 @@ type Registry struct {
 	// the labels back, and re-parsing them out of the key would be a parser
 	// nobody should have to write twice.
 	meta map[string]Sample
+	// constant labels are attached to every series. Vantage lives here: a
+	// prober in Frankfurt and one in Ohio watching the same channel produce
+	// the same series names, and without something to tell them apart the
+	// second one silently overwrites the first in Prometheus.
+	constant map[string]string
 }
 
 // Sample is one series in structured form.
@@ -43,6 +48,30 @@ func New() *Registry {
 	}
 }
 
+// SetConstantLabels attaches labels to every series the registry holds.
+// Called once at startup, before anything is recorded.
+func (r *Registry) SetConstantLabels(labels map[string]string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.constant = labels
+}
+
+// merge folds the constant labels in. Called with the lock held.
+func (r *Registry) merge(labels map[string]string) map[string]string {
+	if len(r.constant) == 0 {
+		return labels
+	}
+	out := make(map[string]string, len(labels)+len(r.constant))
+	for k, v := range labels {
+		out[k] = v
+	}
+	// Constant labels win, so a caller cannot accidentally shadow the vantage.
+	for k, v := range r.constant {
+		out[k] = v
+	}
+	return out
+}
+
 func (r *Registry) register(name, typ, help string) {
 	if _, ok := r.types[name]; !ok {
 		r.types[name] = typ
@@ -56,6 +85,7 @@ func (r *Registry) SetGauge(name, help string, value float64, labels map[string]
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.register(name, "gauge", help)
+	labels = r.merge(labels)
 	key := seriesKey(name, labels)
 	r.vals[key] = value
 	r.remember(key, name, labels)
@@ -66,6 +96,7 @@ func (r *Registry) IncCounter(name, help string, labels map[string]string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.register(name, "counter", help)
+	labels = r.merge(labels)
 	key := seriesKey(name, labels)
 	r.vals[key]++
 	r.remember(key, name, labels)

@@ -221,7 +221,11 @@ func (i Inspection) Timeout() time.Duration {
 
 // Config is the top-level configuration.
 type Config struct {
-	MetricsAddr  string              `json:"metrics_addr"`
+	MetricsAddr string `json:"metrics_addr"`
+	// Vantage names where this prober runs, for a fleet watching the same
+	// streams from several places -- which is how a regional CDN fault
+	// becomes visible at all. Empty adds no label and changes nothing.
+	Vantage      string              `json:"vantage,omitempty"`
 	SlackWebhook string              `json:"slack_webhook,omitempty"`
 	Alerting     Alerting            `json:"alerting"`
 	Inspection   Inspection          `json:"inspection,omitempty"`

@@ -173,6 +173,7 @@ func (t *Tracker) Active() int {
 
 // Incident is a read-only view of one tracked incident, for the web UI.
 type Incident struct {
+	Vantage   string    `json:"vantage,omitempty"`
 	Target    string    `json:"target"`
 	Variant   string    `json:"variant,omitempty"`
 	Check     string    `json:"check"`
@@ -198,7 +199,8 @@ func (t *Tracker) Incidents() []Incident {
 			continue
 		}
 		out = append(out, Incident{
-			Target: inc.last.Target, Variant: inc.last.Variant, Check: inc.last.Check,
+			Vantage: inc.last.Vantage,
+			Target:  inc.last.Target, Variant: inc.last.Variant, Check: inc.last.Check,
 			Severity: inc.last.Severity, Message: inc.last.Message,
 			FirstSeen: inc.firstSeen.UTC(), LastSeen: inc.lastSeen.UTC(),
 			Count: inc.count, Announced: inc.announced,
@@ -242,7 +244,11 @@ func (t *Tracker) Tracking() int {
 // check. The message is deliberately excluded -- segment_availability names a
 // different segment URI every poll.
 func incidentKey(f Finding) string {
-	return f.Target + "\x00" + f.Variant + "\x00" + f.Check
+	// The vantage is part of the identity. The same channel frozen in
+	// Frankfurt and fine in Ohio is two different facts, and collapsing them
+	// into one incident would resolve the real one the moment the healthy
+	// vantage reported in.
+	return f.Vantage + "\x00" + f.Target + "\x00" + f.Variant + "\x00" + f.Check
 }
 
 func (t *Tracker) observe(f Finding) []Finding {
@@ -352,6 +358,8 @@ func render(inc *incident, st Status, now time.Time) Finding {
 func (t *Tracker) publish(fs ...Finding) {
 	for _, f := range fs {
 		if t.mx != nil {
+			// The vantage reaches the metric through the registry's constant
+			// labels, so it is deliberately not repeated here.
 			labels := map[string]string{
 				"target": f.Target, "variant": f.Variant,
 				"check": f.Check, "severity": string(f.Severity),
