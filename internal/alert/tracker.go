@@ -76,9 +76,13 @@ type Tracker struct {
 
 	// statePath, when set, is where open incidents are persisted so a restart
 	// does not re-announce faults a human has already been told about.
-	statePath   string
-	lastSaved   string
-	lastSaveErr string
+	statePath string
+	lastSaved string
+	// saveFailing is a state, not a message. Keying the "have I already said
+	// this" check on the error text does not work: the text carries the
+	// randomly named temp file, so every failure reads as new and a state
+	// directory the process cannot write to logs once per sweep forever.
+	saveFailing bool
 }
 
 // SetSchedule installs the maintenance windows during which alerting is
@@ -123,19 +127,34 @@ func (t *Tracker) Sweep() {
 	t.mu.Unlock()
 	if err != nil {
 		t.saveErr(err)
+	} else {
+		t.saveOK()
 	}
 }
 
-// saveErr reports a failed snapshot once per distinct message. A state file
-// that cannot be written is worth knowing about, but not worth a line every
-// sweep interval for the life of the process.
+// saveErr reports a failed snapshot once, and again only after one has
+// succeeded in between. A state directory the process cannot write to is worth
+// knowing about, but not worth a line every sweep interval for the life of the
+// process.
 func (t *Tracker) saveErr(err error) {
 	t.mu.Lock()
-	repeat := err.Error() == t.lastSaveErr
-	t.lastSaveErr = err.Error()
+	first := !t.saveFailing
+	t.saveFailing = true
 	t.mu.Unlock()
-	if !repeat {
+	if first {
 		log.Printf("alert: could not write incident state: %v", err)
+	}
+}
+
+// saveOK clears the failure state, so a directory that becomes writable again
+// is reported if it later stops being.
+func (t *Tracker) saveOK() {
+	t.mu.Lock()
+	recovered := t.saveFailing
+	t.saveFailing = false
+	t.mu.Unlock()
+	if recovered {
+		log.Printf("alert: incident state is writable again")
 	}
 }
 

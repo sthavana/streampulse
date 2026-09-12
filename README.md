@@ -146,7 +146,8 @@ web UI above answers the question those cannot: what is happening *right now*.
 [maintenance windows](#maintenance-windows) ·
 [web UI](#web-ui) ·
 [metrics](#metrics-exposed-metrics) ·
-[deployment](#deployment)
+[deployment](#deployment) ·
+[production guide](docs/DEPLOYMENT.md)
 
 **About**
 [architecture](#architecture) ·
@@ -1059,6 +1060,13 @@ about when something pages, and two places to get it wrong.
 The rest of the rules cover what the incident machinery cannot: the prober being
 unscrapeable, and two symptoms worth seeing before they become faults (a
 climbing manifest cache age, and segment TTFB).
+
+### Production
+
+`deploy/` is a demo: it builds from source, runs Grafana with no login, and
+points at public test streams. For a real deployment — systemd, Compose or
+Kubernetes, with sizing, security and the operational rough edges stated
+plainly — see **[docs/DEPLOYMENT.md](docs/DEPLOYMENT.md)**.
 
 ### Verified
 

@@ -383,3 +383,55 @@ func TestWriteFileAtomicIsNeverPartiallyVisible(t *testing.T) {
 		}
 	}
 }
+
+// A state directory the process cannot write to must be reported once, not
+// once per sweep for the life of the process. Keying on the error text does
+// not achieve that: the text carries a randomly named temp file, so every
+// failure looks new.
+func TestUnwritableStateIsReportedOnce(t *testing.T) {
+	// The parent of the state file is a regular file, so creating the
+	// temporary alongside it fails with ENOTDIR. A read-only directory would
+	// have been the obvious way to arrange this and does not work: the tests
+	// run as root in CI's container, and root writes to those regardless.
+	dir := t.TempDir()
+	notADir := filepath.Join(dir, "notadir")
+	if err := os.WriteFile(notADir, []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	clk := &clock{t: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)}
+	tr := NewTracker(TrackerConfig{ResolveAfter: 90 * time.Second}, &sink{}, nil)
+	tr.SetClock(clk.now)
+	tr.SetStateFile(filepath.Join(notADir, "state.json"))
+
+	tr.Notify(fault("chan1", "no_segments"))
+
+	var logged int
+	for i := 0; i < 5; i++ {
+		before := tr.saveFailing
+		clk.advance(10 * time.Second)
+		tr.Sweep()
+		if !before && tr.saveFailing {
+			logged++
+		}
+	}
+	if logged != 1 {
+		t.Errorf("the failure was announced %d times, want 1", logged)
+	}
+	if !tr.saveFailing {
+		t.Error("the tracker should know it is still failing")
+	}
+
+	// And once a real directory is there, the next save clears the state so a
+	// later failure is reported again rather than swallowed.
+	if err := os.Remove(notADir); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(notADir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	clk.advance(10 * time.Second)
+	tr.Sweep()
+	if tr.saveFailing {
+		t.Error("a successful save should clear the failure state")
+	}
+}
