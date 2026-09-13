@@ -81,6 +81,11 @@ type Prober struct {
 type edgeState struct {
 	tick       int64
 	lastChange time.Time
+	// The DRM the representation declared last time, and when it last
+	// differed. Kept beside the edge because both are per representation and
+	// both are only meaningful across polls.
+	lastKeyID     string
+	lastKeyChange time.Time
 }
 
 type plState struct {

@@ -292,6 +292,10 @@ is how most packagers write them.
 
 **`key_rotation_max_seconds`** flags a live stream whose keys have stopped
 rotating. It is opt-in because plenty of streams legitimately never rotate.
+It applies to DASH too, where the identity compared is what the manifest
+asserts -- the `default_KID`s and the `cenc:pssh` -- rather than a key URI.
+The elements are compared sorted, so a packager reshuffling its output is not
+mistaken for a rotation.
 
 ## DASH
 
@@ -332,6 +336,7 @@ windows and metrics as the HLS path.
 | `adaptation_set_multiple_main` | warning | Two sets of one type and language both claiming `Role=main` |
 | `representation_missing_mime` | warning | No `@mimeType` on the representation or the set above it |
 | `representation_missing_codecs` | warning | Audio or video declaring no `@codecs` |
+| `key_rotation_stalled` | warning | Declared encryption unchanged for longer than expected *(opt-in)* |
 
 ### What the manifest promises, and whether it is true
 
@@ -402,6 +407,19 @@ because a broken ad period is exactly the case worth catching.
 - `@codecs` is asked of audio and video only. A text track carrying TTML or
   WebVTT routinely declares none and is not wrong to -- there is nothing to be
   incapable of decoding.
+
+### Key rotation
+
+`key_rotation_stalled` now covers DASH as well, through the same
+`key_rotation_max_seconds`. Rotation exists to bound what a leaked key is
+worth, and it stops silently: the stream plays, licences are granted, and the
+window a compromised key opens simply stops closing.
+
+It is opt-in here for a sharper reason than on the HLS side. DASH keys often
+rotate **in-band**, in the `pssh` of each segment's `moof` box, with the MPD
+never changing -- and a manifest probe cannot see that at all. Setting the knob
+is the operator saying their rotation is meant to be visible in the manifest;
+without that assertion, silence would mean nothing either way.
 
 `edge_stale` is the DASH counterpart of HLS's `pdt_stale`. The names differ
 because `pdt_stale` names a tag DASH does not have; they could be unified under

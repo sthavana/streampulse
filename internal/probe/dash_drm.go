@@ -1,6 +1,7 @@
 package probe
 
 import (
+	"sort"
 	"strings"
 	"time"
 
@@ -37,7 +38,76 @@ func (p *Prober) dashDRMChecks(now time.Time, t config.Target, r *dash.Represent
 	for _, c := range prots {
 		out = append(out, protectionChecks(now, t, variant, c)...)
 	}
-	return out
+	return append(out, p.dashRotationCheck(now, t, edgeKey(t, variant), variant, prots)...)
+}
+
+// dashRotationCheck flags a stream whose declared keys have stopped rotating.
+//
+// The HLS counterpart watches the EXT-X-KEY URI change; here the identity is
+// what the manifest asserts about its own encryption -- the key ids and the
+// initialisation data. A packager rotating keys republishes both, so a
+// presentation whose ContentProtection is byte-identical poll after poll is
+// one whose rotation has stopped. That matters because the point of rotation
+// is to bound what a leaked key is worth, and it fails silently: the stream
+// plays, every licence request succeeds, and the window a compromised key
+// opens simply stops closing.
+//
+// Opt-in, through the same key_rotation_max_seconds as HLS, and for a sharper
+// reason than "plenty of streams never rotate". DASH keys often rotate
+// *in-band*, in the pssh of each segment's moof box, with the MPD never
+// changing -- and a manifest probe cannot see that at all. Setting the knob is
+// the operator saying their rotation is supposed to be visible in the
+// manifest; without that assertion, silence here means nothing either way.
+func (p *Prober) dashRotationCheck(now time.Time, t config.Target, key, variant string,
+	prots []dash.ContentProtection) []alert.Finding {
+
+	if t.KeyRotationMaxSec <= 0 || len(prots) == 0 {
+		return nil
+	}
+	id := protectionIdentity(prots)
+
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	st := p.edges[key]
+	if st == nil {
+		st = &edgeState{}
+		p.edges[key] = st
+	}
+	if st.lastKeyID != id {
+		st.lastKeyID, st.lastKeyChange = id, now
+		return nil
+	}
+	if st.lastKeyChange.IsZero() {
+		st.lastKeyChange = now
+		return nil
+	}
+	stale := now.Sub(st.lastKeyChange)
+	if stale <= time.Duration(t.KeyRotationMaxSec)*time.Second {
+		return nil
+	}
+	return []alert.Finding{finding(now, t, variant, alert.Warning, "key_rotation_stalled",
+		"declared encryption unchanged for "+ftoa(stale.Seconds())+"s, expected rotation within "+
+			itoa(t.KeyRotationMaxSec)+"s")}
+}
+
+// protectionIdentity renders what a representation declares about its
+// encryption as one comparable string.
+//
+// Sorted, because the order ContentProtection elements appear in is the
+// packager's business and a reordering is not a rotation -- comparing them in
+// document order would report one every time the packager reshuffled its
+// output. Both the key id and the initialisation data are included: some
+// packagers rotate the pssh while leaving default_KID alone, and either
+// changing is evidence that rotation is alive.
+func protectionIdentity(prots []dash.ContentProtection) string {
+	parts := make([]string, 0, len(prots))
+	for _, c := range prots {
+		parts = append(parts, strings.ToLower(c.SystemID())+"|"+
+			strings.ToLower(strings.TrimSpace(c.DefaultKID))+"|"+
+			strings.Join(strings.Fields(c.PSSH), ""))
+	}
+	sort.Strings(parts)
+	return strings.Join(parts, ",")
 }
 
 func protectionChecks(now time.Time, t config.Target, variant string, c dash.ContentProtection) []alert.Finding {

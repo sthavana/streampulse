@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"time"
 
 	"streampulse/internal/alert"
 	"streampulse/internal/config"
@@ -302,5 +303,166 @@ func TestStructureIsCheckedInEveryPeriod(t *testing.T) {
 	}
 	if !strings.Contains(f.Message, "ad-break-1") {
 		t.Errorf("message does not locate the fault in its period: %q", f.Message)
+	}
+}
+
+// rotatingMPD is a live representation whose declared encryption is whatever
+// kid and pssh are passed in, so a test can rotate them between polls.
+func rotatingMPD(edgeTick int, kid, pssh string) string {
+	body := ""
+	if pssh != "" {
+		body = "<cenc:pssh>" + pssh + "</cenc:pssh>"
+	}
+	return fmt.Sprintf(`<MPD xmlns="urn:mpeg:dash:schema:mpd:2011" xmlns:cenc="urn:mpeg:cenc:2013"
+	   type="dynamic" availabilityStartTime="2026-01-01T00:00:00Z" minimumUpdatePeriod="PT4S">
+	  <Period id="p0" start="PT0S">
+	    <AdaptationSet contentType="video" mimeType="video/mp4" codecs="avc1.4d401f">
+	    <ContentProtection schemeIdUri="urn:mpeg:dash:mp4protection:2011" value="cenc" cenc:default_KID="%s"/>
+	    <ContentProtection schemeIdUri="urn:uuid:EDEF8BA9-79D6-4ACE-A3C8-27DCD51D21ED">%s</ContentProtection>
+	    <SegmentTemplate media="v/$Time$.m4s" timescale="1" startNumber="1">
+	      <SegmentTimeline><S t="%d" d="4" r="4"/></SegmentTimeline>
+	    </SegmentTemplate>
+	    <Representation id="v0" bandwidth="1"/>
+	  </AdaptationSet></Period></MPD>`, kid, body, edgeTick-20)
+}
+
+const (
+	kidA = "21ec2020-3aea-4069-a2dd-08002b30309d"
+	kidB = "31ec2020-3aea-4069-a2dd-08002b30309d"
+)
+
+// The point of rotation is to bound what a leaked key is worth, and it fails
+// silently: the stream plays, licences are granted, and the window a
+// compromised key opens simply stops closing.
+func TestDASHKeyRotationStalled(t *testing.T) {
+	origin := newMutableOrigin(rotatingMPD(liveEdgeTick(0), kidA, ""))
+	defer origin.close()
+
+	pr, clk := newTestProber(dashAST.Add(time.Hour))
+	cap := &capture{}
+	pr.notifier = cap
+	target := config.Target{Name: "live", URL: origin.url(), KeyRotationMaxSec: 60}
+
+	pr.ProbeTarget(context.Background(), target)
+	clk.advance(30 * time.Second)
+	origin.set(rotatingMPD(liveEdgeTick(30*time.Second), kidA, ""))
+	pr.ProbeTarget(context.Background(), target)
+	if cap.has("key_rotation_stalled") {
+		t.Fatalf("fired after 30s of a 60s budget: %+v", cap.findings)
+	}
+
+	clk.advance(45 * time.Second)
+	origin.set(rotatingMPD(liveEdgeTick(75*time.Second), kidA, ""))
+	pr.ProbeTarget(context.Background(), target)
+	f, ok := cap.find("key_rotation_stalled")
+	if !ok {
+		t.Fatalf("a key unchanged for 75s of a 60s budget went unreported: %+v", cap.findings)
+	}
+	if !strings.Contains(f.Message, "75.0s") {
+		t.Errorf("message does not say how long: %q", f.Message)
+	}
+}
+
+// The mirror: a packager that keeps rotating must never be reported.
+func TestDASHKeyRotatingIsSilent(t *testing.T) {
+	origin := newMutableOrigin(rotatingMPD(liveEdgeTick(0), kidA, ""))
+	defer origin.close()
+
+	pr, clk := newTestProber(dashAST.Add(time.Hour))
+	cap := &capture{}
+	pr.notifier = cap
+	target := config.Target{Name: "live", URL: origin.url(), KeyRotationMaxSec: 60}
+
+	for i := 0; i < 6; i++ {
+		pr.ProbeTarget(context.Background(), target)
+		clk.advance(40 * time.Second)
+		kid := kidA
+		if i%2 == 0 {
+			kid = kidB
+		}
+		origin.set(rotatingMPD(liveEdgeTick(time.Duration(i+1)*40*time.Second), kid, ""))
+	}
+	if cap.has("key_rotation_stalled") {
+		t.Fatalf("a rotating stream was reported: %+v", cap.findings)
+	}
+}
+
+// Some packagers rotate the initialisation data while leaving default_KID
+// alone. Either changing is evidence that rotation is alive.
+func TestRotatingPSSHAloneCountsAsRotation(t *testing.T) {
+	origin := newMutableOrigin(rotatingMPD(liveEdgeTick(0), kidA, "AAAAKXBzc2gAAAAA"))
+	defer origin.close()
+
+	pr, clk := newTestProber(dashAST.Add(time.Hour))
+	cap := &capture{}
+	pr.notifier = cap
+	target := config.Target{Name: "live", URL: origin.url(), KeyRotationMaxSec: 60}
+
+	pr.ProbeTarget(context.Background(), target)
+	clk.advance(90 * time.Second)
+	origin.set(rotatingMPD(liveEdgeTick(90*time.Second), kidA, "BBBBKXBzc2gAAAAA"))
+	pr.ProbeTarget(context.Background(), target)
+
+	if cap.has("key_rotation_stalled") {
+		t.Fatalf("a pssh that changed was not counted as rotation: %+v", cap.findings)
+	}
+}
+
+// Opt-in. DASH keys often rotate in-band, in the pssh of each segment's moof,
+// with the MPD never changing -- so without the operator asserting that their
+// rotation is visible in the manifest, silence here means nothing either way.
+func TestDASHRotationIsNotCheckedWithoutTheKnob(t *testing.T) {
+	origin := newMutableOrigin(rotatingMPD(liveEdgeTick(0), kidA, ""))
+	defer origin.close()
+
+	pr, clk := newTestProber(dashAST.Add(time.Hour))
+	cap := &capture{}
+	pr.notifier = cap
+	target := config.Target{Name: "live", URL: origin.url()}
+
+	pr.ProbeTarget(context.Background(), target)
+	clk.advance(2 * time.Hour)
+	origin.set(rotatingMPD(liveEdgeTick(2*time.Hour), kidA, ""))
+	pr.ProbeTarget(context.Background(), target)
+
+	if cap.has("key_rotation_stalled") {
+		t.Fatalf("rotation was checked without key_rotation_max_seconds: %+v", cap.findings)
+	}
+}
+
+// Reordering is the packager's business, not a rotation. Comparing in document
+// order would report one every time the output was reshuffled.
+func TestReorderedProtectionIsNotRotation(t *testing.T) {
+	ordered := func(first, second string) string {
+		return fmt.Sprintf(`<MPD xmlns="urn:mpeg:dash:schema:mpd:2011" xmlns:cenc="urn:mpeg:cenc:2013"
+		   type="dynamic" availabilityStartTime="2026-01-01T00:00:00Z" minimumUpdatePeriod="PT4S">
+		  <Period id="p0" start="PT0S">
+		    <AdaptationSet contentType="video" mimeType="video/mp4" codecs="avc1.4d401f">
+		    <ContentProtection schemeIdUri="urn:uuid:%s"/>
+		    <ContentProtection schemeIdUri="urn:uuid:%s"/>
+		    <SegmentTemplate media="v/$Time$.m4s" timescale="1" startNumber="1">
+		      <SegmentTimeline><S t="%d" d="4" r="4"/></SegmentTimeline>
+		    </SegmentTemplate>
+		    <Representation id="v0" bandwidth="1"/>
+		  </AdaptationSet></Period></MPD>`, first, second, liveEdgeTick(0)-20)
+	}
+	const wv = "EDEF8BA9-79D6-4ACE-A3C8-27DCD51D21ED"
+	const pr9 = "9A04F079-9840-4286-AB92-E65BE0885F95"
+
+	origin := newMutableOrigin(ordered(wv, pr9))
+	defer origin.close()
+
+	prober, clk := newTestProber(dashAST.Add(time.Hour))
+	cap := &capture{}
+	prober.notifier = cap
+	target := config.Target{Name: "live", URL: origin.url(), KeyRotationMaxSec: 60}
+
+	prober.ProbeTarget(context.Background(), target)
+	clk.advance(90 * time.Second)
+	origin.set(ordered(pr9, wv)) // same two systems, swapped
+	prober.ProbeTarget(context.Background(), target)
+
+	if !cap.has("key_rotation_stalled") {
+		t.Fatalf("a reordering was accepted as a rotation: %+v", cap.findings)
 	}
 }
