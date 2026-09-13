@@ -21,12 +21,12 @@ const staticMPD = `<?xml version="1.0" encoding="utf-8"?>
 <MPD xmlns="urn:mpeg:dash:schema:mpd:2011" type="static" mediaPresentationDuration="PT8S"
      profiles="urn:mpeg:dash:profile:isoff-on-demand:2011">
   <Period>
-    <AdaptationSet contentType="video" mimeType="video/mp4">
+    <AdaptationSet contentType="video" mimeType="video/mp4" codecs="avc1.4d401f">
       <SegmentTemplate media="$RepresentationID$/seg-$Number$.m4s" initialization="$RepresentationID$/init.mp4"
                        timescale="1" duration="4" startNumber="1"/>
       <Representation id="v720" bandwidth="2000000" width="1280" height="720"/>
     </AdaptationSet>
-    <AdaptationSet contentType="audio" mimeType="audio/mp4" lang="en">
+    <AdaptationSet contentType="audio" mimeType="audio/mp4" lang="en" codecs="mp4a.40.2">
       <SegmentTemplate media="$RepresentationID$/seg-$Number$.m4s" initialization="$RepresentationID$/init.mp4"
                        timescale="1" duration="4" startNumber="1"/>
       <Representation id="a128" bandwidth="128000"/>
@@ -135,7 +135,7 @@ func TestBrokenDASHAudioIsAttributedToItsRepresentation(t *testing.T) {
 func TestDASHLiveProbesOnlyTheAvailabilityWindow(t *testing.T) {
 	const liveMPD = `<MPD xmlns="urn:mpeg:dash:schema:mpd:2011" type="dynamic"
 	     availabilityStartTime="2026-01-01T00:00:00Z" timeShiftBufferDepth="PT20S" minimumUpdatePeriod="PT4S">
-	  <Period start="PT0S"><AdaptationSet contentType="video" mimeType="video/mp4">
+	  <Period start="PT0S"><AdaptationSet contentType="video" mimeType="video/mp4" codecs="avc1.4d401f">
 	    <SegmentTemplate media="v/$Number$.m4s" timescale="1" duration="4" startNumber="1"/>
 	    <Representation id="v0" bandwidth="1"/>
 	  </AdaptationSet></Period></MPD>`
@@ -171,7 +171,7 @@ func TestDASHLiveProbesOnlyTheAvailabilityWindow(t *testing.T) {
 func TestDASHEmptyWindowIsReported(t *testing.T) {
 	const notStartedMPD = `<MPD xmlns="urn:mpeg:dash:schema:mpd:2011" type="dynamic"
 	     availabilityStartTime="2026-01-01T00:00:00Z">
-	  <Period start="PT0S"><AdaptationSet contentType="video" mimeType="video/mp4">
+	  <Period start="PT0S"><AdaptationSet contentType="video" mimeType="video/mp4" codecs="avc1.4d401f">
 	    <SegmentTemplate media="v/$Number$.m4s" timescale="1" duration="4" startNumber="1"/>
 	    <Representation id="v0" bandwidth="1"/>
 	  </AdaptationSet></Period></MPD>`
@@ -250,13 +250,13 @@ func TestDeclaredDASHReportsAParseError(t *testing.T) {
 
 const ladderMPD = `<MPD xmlns="urn:mpeg:dash:schema:mpd:2011" type="static" mediaPresentationDuration="PT4S">
   <Period>
-    <AdaptationSet contentType="video" mimeType="video/mp4">
+    <AdaptationSet contentType="video" mimeType="video/mp4" codecs="avc1.4d401f">
       <SegmentTemplate media="$RepresentationID$.m4s" timescale="1" duration="4"/>
       <Representation id="v240" bandwidth="400000"/>
       <Representation id="v720" bandwidth="2000000"/>
       <Representation id="v1080" bandwidth="6000000"/>
     </AdaptationSet>
-    <AdaptationSet contentType="audio" mimeType="audio/mp4" lang="en">
+    <AdaptationSet contentType="audio" mimeType="audio/mp4" lang="en" codecs="mp4a.40.2">
       <SegmentTemplate media="$RepresentationID$.m4s" timescale="1" duration="4"/>
       <Representation id="a128" bandwidth="128000"/>
     </AdaptationSet>

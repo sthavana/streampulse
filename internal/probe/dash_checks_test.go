@@ -25,7 +25,7 @@ var dashAST = time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
 func timelineMPD(edgeTick, n int) string {
 	return fmt.Sprintf(`<MPD xmlns="urn:mpeg:dash:schema:mpd:2011" type="dynamic"
 	   availabilityStartTime="2026-01-01T00:00:00Z" minimumUpdatePeriod="PT4S">
-	  <Period id="p0" start="PT0S"><AdaptationSet contentType="video" mimeType="video/mp4">
+	  <Period id="p0" start="PT0S"><AdaptationSet contentType="video" mimeType="video/mp4" codecs="avc1.4d401f">
 	    <SegmentTemplate media="v/$Time$.m4s" timescale="1" startNumber="1">
 	      <SegmentTimeline><S t="%d" d="4" r="%d"/></SegmentTimeline>
 	    </SegmentTemplate>
@@ -164,13 +164,13 @@ func TestStaticMPDNeverStalls(t *testing.T) {
 func TestClosedPeriodNeverStalls(t *testing.T) {
 	multiPeriod := `<MPD xmlns="urn:mpeg:dash:schema:mpd:2011" type="dynamic"
 	   availabilityStartTime="2026-01-01T00:00:00Z" minimumUpdatePeriod="PT4S">
-	  <Period id="ad" start="PT0S" duration="PT12S"><AdaptationSet contentType="video" mimeType="video/mp4">
+	  <Period id="ad" start="PT0S" duration="PT12S"><AdaptationSet contentType="video" mimeType="video/mp4" codecs="avc1.4d401f">
 	    <SegmentTemplate media="ad/$Time$.m4s" timescale="1">
 	      <SegmentTimeline><S t="0" d="4" r="2"/></SegmentTimeline>
 	    </SegmentTemplate>
 	    <Representation id="adv0" bandwidth="1"/>
 	  </AdaptationSet></Period>
-	  <Period id="main" start="PT12S"><AdaptationSet contentType="video" mimeType="video/mp4">
+	  <Period id="main" start="PT12S"><AdaptationSet contentType="video" mimeType="video/mp4" codecs="avc1.4d401f">
 	    <SegmentTemplate media="m/$Time$.m4s" timescale="1">
 	      <SegmentTimeline><S t="12" d="4" r="2"/></SegmentTimeline>
 	    </SegmentTemplate>
@@ -213,7 +213,7 @@ func TestClosedPeriodNeverStalls(t *testing.T) {
 func TestNumberAddressedLiveDoesNotFakeAFreezeCheck(t *testing.T) {
 	numberMPD := `<MPD xmlns="urn:mpeg:dash:schema:mpd:2011" type="dynamic"
 	   availabilityStartTime="2026-01-01T00:00:00Z" timeShiftBufferDepth="PT30S">
-	  <Period start="PT0S"><AdaptationSet contentType="video" mimeType="video/mp4">
+	  <Period start="PT0S"><AdaptationSet contentType="video" mimeType="video/mp4" codecs="avc1.4d401f">
 	    <SegmentTemplate media="v/$Number$.m4s" timescale="1" duration="4" startNumber="1"/>
 	    <Representation id="v0" bandwidth="1"/>
 	  </AdaptationSet></Period></MPD>`
@@ -313,7 +313,7 @@ func TestManifestEdge(t *testing.T) {
 	const (
 		liveTimeline = `<MPD xmlns="urn:mpeg:dash:schema:mpd:2011" type="dynamic"
 		   availabilityStartTime="2026-01-01T00:00:00Z">
-		  <Period start="PT0S"><AdaptationSet contentType="video" mimeType="video/mp4">
+		  <Period start="PT0S"><AdaptationSet contentType="video" mimeType="video/mp4" codecs="avc1.4d401f">
 		    <SegmentTemplate media="v/$Time$.m4s" timescale="1">
 		      <SegmentTimeline><S t="8" d="4" r="2"/></SegmentTimeline>
 		    </SegmentTemplate><Representation id="v0" bandwidth="1"/>
@@ -323,7 +323,7 @@ func TestManifestEdge(t *testing.T) {
 		// the closed-period rule cannot be what refuses this one: it is
 		// refused for being static.
 		staticTimeline = `<MPD xmlns="urn:mpeg:dash:schema:mpd:2011" type="static">
-		  <Period><AdaptationSet contentType="video" mimeType="video/mp4">
+		  <Period><AdaptationSet contentType="video" mimeType="video/mp4" codecs="avc1.4d401f">
 		    <SegmentTemplate media="v/$Time$.m4s" timescale="1">
 		      <SegmentTimeline><S t="0" d="4" r="2"/></SegmentTimeline>
 		    </SegmentTemplate><Representation id="v0" bandwidth="1"/>
@@ -331,14 +331,14 @@ func TestManifestEdge(t *testing.T) {
 
 		liveNumber = `<MPD xmlns="urn:mpeg:dash:schema:mpd:2011" type="dynamic"
 		   availabilityStartTime="2026-01-01T00:00:00Z">
-		  <Period start="PT0S"><AdaptationSet contentType="video" mimeType="video/mp4">
+		  <Period start="PT0S"><AdaptationSet contentType="video" mimeType="video/mp4" codecs="avc1.4d401f">
 		    <SegmentTemplate media="v/$Number$.m4s" timescale="1" duration="4"/>
 		    <Representation id="v0" bandwidth="1"/>
 		  </AdaptationSet></Period></MPD>`
 
 		closedPeriod = `<MPD xmlns="urn:mpeg:dash:schema:mpd:2011" type="dynamic"
 		   availabilityStartTime="2026-01-01T00:00:00Z">
-		  <Period start="PT0S" duration="PT12S"><AdaptationSet contentType="video" mimeType="video/mp4">
+		  <Period start="PT0S" duration="PT12S"><AdaptationSet contentType="video" mimeType="video/mp4" codecs="avc1.4d401f">
 		    <SegmentTemplate media="v/$Time$.m4s" timescale="1">
 		      <SegmentTimeline><S t="0" d="4" r="2"/></SegmentTimeline>
 		    </SegmentTemplate><Representation id="v0" bandwidth="1"/>
@@ -386,7 +386,7 @@ func dashParse(t *testing.T, raw string) (*dash.MPD, error) {
 func TestLongMinimumUpdatePeriodRaisesTheStallThreshold(t *testing.T) {
 	slow := `<MPD xmlns="urn:mpeg:dash:schema:mpd:2011" type="dynamic"
 	   availabilityStartTime="2026-01-01T00:00:00Z" minimumUpdatePeriod="PT30S">
-	  <Period start="PT0S"><AdaptationSet contentType="video" mimeType="video/mp4">
+	  <Period start="PT0S"><AdaptationSet contentType="video" mimeType="video/mp4" codecs="avc1.4d401f">
 	    <SegmentTemplate media="v/$Time$.m4s" timescale="1">
 	      <SegmentTimeline><S t="3560" d="4" r="9"/></SegmentTimeline>
 	    </SegmentTemplate><Representation id="v0" bandwidth="1"/>
@@ -461,7 +461,7 @@ func TestDASHDRMChecks(t *testing.T) {
 	mpdWith := func(protection string) string {
 		return `<MPD xmlns="urn:mpeg:dash:schema:mpd:2011" xmlns:cenc="urn:mpeg:cenc:2013"
 		   type="static" mediaPresentationDuration="PT8S">
-		  <Period><AdaptationSet contentType="video" mimeType="video/mp4">` + protection + `
+		  <Period><AdaptationSet contentType="video" mimeType="video/mp4" codecs="avc1.4d401f">` + protection + `
 		    <SegmentTemplate media="v/$Number$.m4s" timescale="1" duration="4"/>
 		    <Representation id="v0" bandwidth="1"/>
 		  </AdaptationSet></Period></MPD>`
@@ -508,7 +508,7 @@ func TestValidPSSHIsSilentAndNamed(t *testing.T) {
 	box := psshBox(hls.SystemWidevine, []byte("init-data"))
 	raw := `<MPD xmlns="urn:mpeg:dash:schema:mpd:2011" xmlns:cenc="urn:mpeg:cenc:2013"
 	   type="static" mediaPresentationDuration="PT4S">
-	  <Period><AdaptationSet contentType="video" mimeType="video/mp4">
+	  <Period><AdaptationSet contentType="video" mimeType="video/mp4" codecs="avc1.4d401f">
 	    <ContentProtection schemeIdUri="urn:uuid:EDEF8BA9-79D6-4ACE-A3C8-27DCD51D21ED">
 	      <cenc:pssh>` + base64.StdEncoding.EncodeToString(box) + `</cenc:pssh>
 	    </ContentProtection>
@@ -538,10 +538,10 @@ func TestValidPSSHIsSilentAndNamed(t *testing.T) {
 // discontinuities are.
 func TestPeriodBoundariesAreReported(t *testing.T) {
 	raw := `<MPD xmlns="urn:mpeg:dash:schema:mpd:2011" type="static" mediaPresentationDuration="PT16S">
-	  <Period id="a" duration="PT8S"><AdaptationSet contentType="video" mimeType="video/mp4">
+	  <Period id="a" duration="PT8S"><AdaptationSet contentType="video" mimeType="video/mp4" codecs="avc1.4d401f">
 	    <SegmentTemplate media="a/$Number$.m4s" timescale="1" duration="4"/>
 	    <Representation id="v0" bandwidth="1"/></AdaptationSet></Period>
-	  <Period id="b" duration="PT8S"><AdaptationSet contentType="video" mimeType="video/mp4">
+	  <Period id="b" duration="PT8S"><AdaptationSet contentType="video" mimeType="video/mp4" codecs="avc1.4d401f">
 	    <SegmentTemplate media="b/$Number$.m4s" timescale="1" duration="4"/>
 	    <Representation id="v0" bandwidth="1"/></AdaptationSet></Period></MPD>`
 
@@ -634,7 +634,7 @@ func gappyMPD(edgeTick, n, hole int) string {
 	return fmt.Sprintf(`<MPD xmlns="urn:mpeg:dash:schema:mpd:2011" type="dynamic"
 	   availabilityStartTime="2026-01-01T00:00:00Z" minimumUpdatePeriod="PT4S"
 	   timeShiftBufferDepth="PT1H">
-	  <Period id="p0" start="PT0S"><AdaptationSet contentType="video" mimeType="video/mp4">
+	  <Period id="p0" start="PT0S"><AdaptationSet contentType="video" mimeType="video/mp4" codecs="avc1.4d401f">
 	    <SegmentTemplate media="v/$Time$.m4s" timescale="1" startNumber="1">
 	      <SegmentTimeline><S t="%d" d="4" r="%d"/><S t="%d" d="4" r="%d"/></SegmentTimeline>
 	    </SegmentTemplate>
@@ -709,7 +709,7 @@ func TestBreaksOutsideTheWindowAreNotReported(t *testing.T) {
 	body := fmt.Sprintf(`<MPD xmlns="urn:mpeg:dash:schema:mpd:2011" type="dynamic"
 	   availabilityStartTime="2026-01-01T00:00:00Z" minimumUpdatePeriod="PT4S"
 	   timeShiftBufferDepth="PT60S">
-	  <Period id="p0" start="PT0S"><AdaptationSet contentType="video" mimeType="video/mp4">
+	  <Period id="p0" start="PT0S"><AdaptationSet contentType="video" mimeType="video/mp4" codecs="avc1.4d401f">
 	    <SegmentTemplate media="v/$Time$.m4s" timescale="1" startNumber="1">
 	      <SegmentTimeline><S t="0" d="4" r="2"/><S t="1000" d="4" r="%d"/></SegmentTimeline>
 	    </SegmentTemplate>
@@ -735,7 +735,7 @@ func dvrMPD(edgeTick, n int, depth string) string {
 	return fmt.Sprintf(`<MPD xmlns="urn:mpeg:dash:schema:mpd:2011" type="dynamic"
 	   availabilityStartTime="2026-01-01T00:00:00Z" minimumUpdatePeriod="PT4S"
 	   timeShiftBufferDepth="%s">
-	  <Period id="p0" start="PT0S"><AdaptationSet contentType="video" mimeType="video/mp4">
+	  <Period id="p0" start="PT0S"><AdaptationSet contentType="video" mimeType="video/mp4" codecs="avc1.4d401f">
 	    <SegmentTemplate media="v/$Time$.m4s" timescale="1" startNumber="1">
 	      <SegmentTimeline><S t="%d" d="4" r="%d"/></SegmentTimeline>
 	    </SegmentTemplate>
@@ -783,7 +783,7 @@ func TestWindowSlightlyShortOfTheDepthIsSilent(t *testing.T) {
 func TestDeclaredDepthIsNotCheckedOnStatic(t *testing.T) {
 	body := `<MPD xmlns="urn:mpeg:dash:schema:mpd:2011" type="static"
 	   timeShiftBufferDepth="PT10M" mediaPresentationDuration="PT20S">
-	  <Period id="p0" start="PT0S"><AdaptationSet contentType="video" mimeType="video/mp4">
+	  <Period id="p0" start="PT0S"><AdaptationSet contentType="video" mimeType="video/mp4" codecs="avc1.4d401f">
 	    <SegmentTemplate media="v/$Time$.m4s" timescale="1" startNumber="1">
 	      <SegmentTimeline><S t="0" d="4" r="4"/></SegmentTimeline>
 	    </SegmentTemplate>
@@ -808,7 +808,7 @@ func TestSegmentLongerThanDeclaredMaximum(t *testing.T) {
 	body := fmt.Sprintf(`<MPD xmlns="urn:mpeg:dash:schema:mpd:2011" type="dynamic"
 	   availabilityStartTime="2026-01-01T00:00:00Z" minimumUpdatePeriod="PT4S"
 	   maxSegmentDuration="PT4S" timeShiftBufferDepth="PT1H">
-	  <Period id="p0" start="PT0S"><AdaptationSet contentType="video" mimeType="video/mp4">
+	  <Period id="p0" start="PT0S"><AdaptationSet contentType="video" mimeType="video/mp4" codecs="avc1.4d401f">
 	    <SegmentTemplate media="v/$Time$.m4s" timescale="1" startNumber="1">
 	      <SegmentTimeline><S t="%d" d="4" r="2"/><S d="11"/></SegmentTimeline>
 	    </SegmentTemplate>
@@ -855,11 +855,11 @@ func periodsMPD(firstDuration, secondStart string) string {
 	return fmt.Sprintf(`<MPD xmlns="urn:mpeg:dash:schema:mpd:2011" type="static"
 	   mediaPresentationDuration="PT1H">
 	  <Period id="content-1" start="PT0S" duration="%s">
-	    <AdaptationSet contentType="video" mimeType="video/mp4">
+	    <AdaptationSet contentType="video" mimeType="video/mp4" codecs="avc1.4d401f">
 	    <SegmentTemplate media="a/$Number$.m4s" timescale="1" duration="4" startNumber="1"/>
 	    <Representation id="v0" bandwidth="1"/></AdaptationSet></Period>
 	  <Period id="ad-break-1" start="%s">
-	    <AdaptationSet contentType="video" mimeType="video/mp4">
+	    <AdaptationSet contentType="video" mimeType="video/mp4" codecs="avc1.4d401f">
 	    <SegmentTemplate media="b/$Number$.m4s" timescale="1" duration="4" startNumber="1"/>
 	    <Representation id="v0" bandwidth="1"/></AdaptationSet></Period></MPD>`,
 		firstDuration, secondStart)
@@ -934,11 +934,11 @@ func TestDerivedPeriodTimesAreNotCompared(t *testing.T) {
 	body := `<MPD xmlns="urn:mpeg:dash:schema:mpd:2011" type="static"
 	   mediaPresentationDuration="PT1H">
 	  <Period id="content-1" start="PT0S" duration="PT30S">
-	    <AdaptationSet contentType="video" mimeType="video/mp4">
+	    <AdaptationSet contentType="video" mimeType="video/mp4" codecs="avc1.4d401f">
 	    <SegmentTemplate media="a/$Number$.m4s" timescale="1" duration="4" startNumber="1"/>
 	    <Representation id="v0" bandwidth="1"/></AdaptationSet></Period>
 	  <Period id="ad-break-1">
-	    <AdaptationSet contentType="video" mimeType="video/mp4">
+	    <AdaptationSet contentType="video" mimeType="video/mp4" codecs="avc1.4d401f">
 	    <SegmentTemplate media="b/$Number$.m4s" timescale="1" duration="4" startNumber="1"/>
 	    <Representation id="v0" bandwidth="1"/></AdaptationSet></Period></MPD>`
 	if cap := probePeriods(t, body); cap.has("period_gap") || cap.has("period_overlap") {
@@ -1022,10 +1022,10 @@ func multiPeriodLiveMPD() string {
 	   availabilityStartTime="2026-01-01T00:00:00Z" minimumUpdatePeriod="PT6S"
 	   timeShiftBufferDepth="PT60S">
 	  <Period id="content-1" start="PT3540S" duration="PT30S">
-	    <AdaptationSet contentType="video" mimeType="video/mp4">%s
+	    <AdaptationSet contentType="video" mimeType="video/mp4" codecs="avc1.4d401f">%s
 	    <Representation id="v0" bandwidth="1"/></AdaptationSet></Period>
 	  <Period id="ad-break-1" start="PT3570S">
-	    <AdaptationSet contentType="video" mimeType="video/mp4">%s
+	    <AdaptationSet contentType="video" mimeType="video/mp4" codecs="avc1.4d401f">%s
 	    <Representation id="v0" bandwidth="1"/></AdaptationSet></Period></MPD>`, seg, seg)
 }
 
@@ -1080,7 +1080,7 @@ func TestNoSegmentsIsNotAlsoAShortWindow(t *testing.T) {
 	body := `<MPD xmlns="urn:mpeg:dash:schema:mpd:2011" type="dynamic"
 	   availabilityStartTime="2026-01-01T00:00:00Z" minimumUpdatePeriod="PT4S"
 	   timeShiftBufferDepth="PT60S">
-	  <Period id="p0" start="PT0S"><AdaptationSet contentType="video" mimeType="video/mp4">
+	  <Period id="p0" start="PT0S"><AdaptationSet contentType="video" mimeType="video/mp4" codecs="avc1.4d401f">
 	    <SegmentTemplate media="v/$Time$.m4s" timescale="1" startNumber="1">
 	      <SegmentTimeline><S t="7200" d="4" r="4"/></SegmentTimeline>
 	    </SegmentTemplate>

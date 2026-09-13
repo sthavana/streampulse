@@ -144,14 +144,18 @@ type AdaptationSet struct {
 // and ContentProtections are the *effective* ones, with everything inherited
 // from the adaptation set, period and MPD already folded in.
 type Representation struct {
-	ID                 string              `xml:"id,attr"`
-	Bandwidth          int                 `xml:"bandwidth,attr"`
-	MimeType           string              `xml:"mimeType,attr"`
-	Codecs             string              `xml:"codecs,attr"`
-	Width              int                 `xml:"width,attr"`
-	Height             int                 `xml:"height,attr"`
-	FrameRate          string              `xml:"frameRate,attr"`
-	AudioSamplingRate  string              `xml:"audioSamplingRate,attr"`
+	ID                string `xml:"id,attr"`
+	Bandwidth         int    `xml:"bandwidth,attr"`
+	MimeType          string `xml:"mimeType,attr"`
+	Codecs            string `xml:"codecs,attr"`
+	Width             int    `xml:"width,attr"`
+	Height            int    `xml:"height,attr"`
+	FrameRate         string `xml:"frameRate,attr"`
+	AudioSamplingRate string `xml:"audioSamplingRate,attr"`
+	// DependencyID is the whitespace-separated list of Representation @ids
+	// this one is useless without: the base layer under a scalable
+	// enhancement, most often. A player must fetch all of them or none.
+	DependencyID       string              `xml:"dependencyId,attr"`
 	ContentProtections []ContentProtection `xml:"ContentProtection"`
 	BaseURLs           []string            `xml:"BaseURL"`
 	SegmentTemplate    *SegmentTemplate    `xml:"SegmentTemplate"`

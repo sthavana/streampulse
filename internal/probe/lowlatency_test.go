@@ -28,7 +28,7 @@ func llMPD(edgeTick int, opts ...string) string {
 	    <PlaybackRate min="0.96" max="1.04"/>
 	  </ServiceDescription>
 	  %s
-	  <Period id="p0" start="PT0S"><AdaptationSet contentType="video" mimeType="video/mp4">
+	  <Period id="p0" start="PT0S"><AdaptationSet contentType="video" mimeType="video/mp4" codecs="avc1.4d401f">
 	    <SegmentTemplate media="v/$Time$.m4s" initialization="v/init.mp4" timescale="1"
 	                     availabilityTimeOffset="4" availabilityTimeComplete="false">
 	      <SegmentTimeline><S t="%d" d="4" r="4"/></SegmentTimeline>
@@ -258,7 +258,7 @@ func TestEarlyPublishingWithoutChunkingIsNotJudged(t *testing.T) {
 	// ServiceDescription: segments arrive early, whole.
 	earlyMPD := fmt.Sprintf(`<MPD xmlns="urn:mpeg:dash:schema:mpd:2011" type="dynamic"
 	   availabilityStartTime="2026-01-01T00:00:00Z">
-	  <Period start="PT0S"><AdaptationSet contentType="video" mimeType="video/mp4">
+	  <Period start="PT0S"><AdaptationSet contentType="video" mimeType="video/mp4" codecs="avc1.4d401f">
 	    <SegmentTemplate media="v/$Time$.m4s" timescale="1" availabilityTimeOffset="4">
 	      <SegmentTimeline><S t="%d" d="4" r="4"/></SegmentTimeline>
 	    </SegmentTemplate>

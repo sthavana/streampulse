@@ -98,7 +98,7 @@ open, and both times a macOS run reported everything green.
 |---|---|
 | **Availability** | manifests and segments that 404, time out, or return something that is not a manifest |
 | **Liveness** | frozen live edges, timelines going backwards, less DVR than the manifest promises, edges drifting behind wall clock |
-| **Structure** | spec violations, dangling rendition groups, missing initialisation sections, empty playlists, holes and overlaps in a DASH timeline or at a period boundary |
+| **Structure** | spec violations, dangling rendition groups and DASH dependencies, missing initialisation sections, empty playlists and adaptation sets, holes and overlaps in a DASH timeline or at a period boundary |
 | **DRM** | unretrievable keys, clear segments on an encrypted stream, malformed PSSH, keys that stopped rotating |
 | **Low latency** | chunked delivery silently degraded to whole-segment buffering, latency past the declared bound |
 | **The media itself** | codec and resolution that disagree with the manifest, declared tracks that are not there, black or frozen video, silent audio; a picture and level per stream *(optional, needs ffprobe/ffmpeg)* |
@@ -325,6 +325,13 @@ windows and metrics as the HLS path.
 | `period_overlap` | critical/warning | A period starting before the previous one ends |
 | `window_below_declared` | warning | Less DVR than `@timeShiftBufferDepth` promises |
 | `segment_duration_violation` | warning | A segment longer than `@maxSegmentDuration` |
+| `period_empty` | critical | A period declaring no adaptation sets -- nothing to play for its duration |
+| `adaptation_set_empty` | critical | A track with no representations under it |
+| `representation_duplicate_id` | critical | Two representations sharing an `@id`, so `$RepresentationID$` collides |
+| `dependency_missing` | critical | `@dependencyId` pointing at a representation the period does not contain |
+| `adaptation_set_multiple_main` | warning | Two sets of one type and language both claiming `Role=main` |
+| `representation_missing_mime` | warning | No `@mimeType` on the representation or the set above it |
+| `representation_missing_codecs` | warning | Audio or video declaring no `@codecs` |
 
 ### What the manifest promises, and whether it is true
 
@@ -368,6 +375,33 @@ put in the manifest itself, so none of them needs configuring.
 
 - **`@maxSegmentDuration` is what players size their buffers from.** A segment
   longer than it is a rebuffer on a stream whose every request succeeded.
+
+### Does the document describe something playable
+
+The last seven are the DASH counterparts of the `EXT-X-MEDIA` rendition checks
+on the HLS side, and they ask the same question: does this manifest promise a
+track it does not deliver. None of them fetches anything. A manifest can be
+perfectly available, perfectly fresh, every segment a 200, and still be
+unplayable.
+
+They run against **every** period, including the ones the segment checks skip,
+because a broken ad period is exactly the case worth catching.
+
+- `@id` is what `$RepresentationID$` expands to, so two representations sharing
+  one resolve to the same segment URLs: one serves the other's media, at the
+  wrong bitrate or in the wrong language, with every request succeeding.
+  Uniqueness is scoped to the period, as the spec scopes it -- reusing ids in
+  the next period is ordinary.
+- `@dependencyId` is a pointer, and a pointer to nothing leaves a player unable
+  to assemble a stream it was offered. Each id in the list is resolved
+  separately, against every representation in the period.
+- `Role=main` twice is the DASH shape of two HLS renditions in one group both
+  claiming `DEFAULT=YES`. Scoped to one content type *and* one language,
+  deliberately: marking the main audio of every language is ordinary and
+  correct, and two English audio sets both claiming to be the main one is not.
+- `@codecs` is asked of audio and video only. A text track carrying TTML or
+  WebVTT routinely declares none and is not wrong to -- there is nothing to be
+  incapable of decoding.
 
 `edge_stale` is the DASH counterpart of HLS's `pdt_stale`. The names differ
 because `pdt_stale` names a tag DASH does not have; they could be unified under
@@ -1208,5 +1242,6 @@ MVP. Media inspection is optional and off by default; everything else is
 standard library only. The HLS path is implemented and tested end to end
 (`make test`). DASH is
 probed for reachability, segment availability, live-edge progression, the DRM
-its manifest declares, and the promises the MPD makes about its own timeline,
-periods, DVR depth and segment durations. Not yet production-hardened.
+its manifest declares, the promises the MPD makes about its own timeline,
+periods, DVR depth and segment durations, and whether the document describes
+something a player can select from. Not yet production-hardened.

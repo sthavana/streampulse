@@ -34,6 +34,7 @@ func dashManifestChecks(now time.Time, t config.Target, m *dash.MPD) []alert.Fin
 			itoa(n)+" periods in the presentation (each boundary is a splice point)"))
 	}
 	out = append(out, periodContinuityChecks(now, t, m)...)
+	out = append(out, dashStructureChecks(now, t, m)...)
 	return append(out, declaredWindowCheck(now, t, m)...)
 }
 
