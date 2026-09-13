@@ -35,11 +35,25 @@ func (c *Config) Reload() time.Duration {
 // A change that fails to load is reported with a nil config and an error
 // rather than swallowed. Monitoring must not stop because someone saved a
 // typo, so the caller logs it and keeps running on what it already had.
+//
+// One exception to that, and it is the difference between a useful error and
+// noise: a write that is still in progress. Not every editor renames a temp
+// file into place -- a shell redirect, or a bind-mounted file edited where it
+// lies, truncates and then writes -- and a poll landing in that window reads
+// half a document and calls it a syntax error. So a config that fails to load
+// is given one more tick to settle, and only reported if it is still broken
+// when the file has stopped changing. A genuine typo is reported one poll
+// later than it used to be, which nobody will notice, and a half-written file
+// is not reported at all, which was showing up as an error nobody could
+// reproduce.
 func Watch(ctx context.Context, path string, every time.Duration, onChange func(*Config, error)) {
 	if every <= 0 {
 		return
 	}
 	last, _ := hash(path)
+	// pending holds the hash of a version that failed to load, waiting to see
+	// whether the next tick still reads the same bytes.
+	var pending string
 
 	ticker := time.NewTicker(every)
 	defer ticker.Stop()
@@ -57,8 +71,16 @@ func Watch(ctx context.Context, path string, every time.Duration, onChange func(
 			if sum == last {
 				continue
 			}
-			last = sum
-			onChange(Load(path))
+			cfg, loadErr := Load(path)
+			if loadErr != nil && sum != pending {
+				// First sighting of bytes that do not load. Do not accept
+				// them as the current version, so that a writer still working
+				// is picked up on a later tick either way.
+				pending = sum
+				continue
+			}
+			last, pending = sum, ""
+			onChange(cfg, loadErr)
 		}
 	}
 }

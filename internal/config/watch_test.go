@@ -208,3 +208,68 @@ func TestWatchDisabled(t *testing.T) {
 		t.Fatal("a zero interval should return immediately, not poll")
 	}
 }
+
+// A writer that truncates and then writes -- a shell redirect, or a
+// bind-mounted file edited where it lies -- leaves a window in which the file
+// is half a document. A poll landing in it used to report a syntax error
+// nobody could reproduce.
+func TestWatchIgnoresAHalfWrittenFile(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.json")
+	writeConfig(t, path, `{"name":"a","url":"http://a/x.m3u8"}`)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	calls := make(chan error, 16)
+	// Slow enough that the timeline below is unambiguous: one poll sees the
+	// truncated file and the next sees the finished one, which is exactly
+	// what a write in progress looks like.
+	go Watch(ctx, path, 50*time.Millisecond, func(_ *Config, err error) { calls <- err })
+
+	whole := `{"metrics_addr":":9090","targets":[{"name":"a","url":"http://a/x.m3u8"},` +
+		`{"name":"b","url":"http://b/x.m3u8"}]}`
+	if err := os.WriteFile(path, []byte(whole[:40]), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(60 * time.Millisecond)
+	if err := os.WriteFile(path, []byte(whole), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	select {
+	case err := <-calls:
+		if err != nil {
+			t.Fatalf("a write in progress was reported as an error: %v", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("the completed file was never picked up")
+	}
+}
+
+// The settle rule must not swallow a real one. A config that stays broken is
+// still reported, one tick later than it used to be.
+func TestWatchStillReportsAConfigThatStaysBroken(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.json")
+	writeConfig(t, path, `{"name":"a","url":"http://a/x.m3u8"}`)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	calls := make(chan error, 16)
+	go Watch(ctx, path, 5*time.Millisecond, func(_ *Config, err error) { calls <- err })
+	// Let the watcher take its baseline first: a write that lands before it
+	// does becomes the baseline and is never seen as a change.
+	time.Sleep(50 * time.Millisecond)
+
+	if err := os.WriteFile(path, []byte(`{"targets": oops`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-calls:
+		if err == nil {
+			t.Fatal("a broken config was accepted")
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("a config that stayed broken was never reported")
+	}
+}
