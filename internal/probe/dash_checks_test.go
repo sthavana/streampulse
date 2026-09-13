@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"streampulse/internal/alert"
 	"streampulse/internal/config"
 	"streampulse/internal/dash"
 	"streampulse/internal/hls"
@@ -609,5 +610,494 @@ func TestStalenessThreshold(t *testing.T) {
 		if got := stalenessThreshold(c.segment, m); got != c.want {
 			t.Errorf("%s: threshold = %v, want %v", c.name, got, c.want)
 		}
+	}
+}
+
+// find returns the first finding for a check, so a test can assert on what it
+// says rather than only that it fired.
+func (c *capture) find(check string) (alert.Finding, bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	for _, f := range c.findings {
+		if f.Check == check {
+			return f, true
+		}
+	}
+	return alert.Finding{}, false
+}
+
+// gappyMPD is a live timeline whose two runs do not meet: `hole` seconds of
+// presentation are missing between them. Each run is n 4s segments and the
+// last one ends at edgeTick.
+func gappyMPD(edgeTick, n, hole int) string {
+	first := edgeTick - 4*n - hole - 4*n
+	return fmt.Sprintf(`<MPD xmlns="urn:mpeg:dash:schema:mpd:2011" type="dynamic"
+	   availabilityStartTime="2026-01-01T00:00:00Z" minimumUpdatePeriod="PT4S"
+	   timeShiftBufferDepth="PT1H">
+	  <Period id="p0" start="PT0S"><AdaptationSet contentType="video" mimeType="video/mp4">
+	    <SegmentTemplate media="v/$Time$.m4s" timescale="1" startNumber="1">
+	      <SegmentTimeline><S t="%d" d="4" r="%d"/><S t="%d" d="4" r="%d"/></SegmentTimeline>
+	    </SegmentTemplate>
+	    <Representation id="v0" bandwidth="1"/>
+	  </AdaptationSet></Period></MPD>`, first, n-1, first+4*n+hole, n-1)
+}
+
+// A hole in the timeline is a hole in playback, and no other check can see it:
+// every segment listed fetches, the manifest parses, the edge advances.
+func TestTimelineGapIsReported(t *testing.T) {
+	origin := newMutableOrigin(gappyMPD(liveEdgeTick(0), 5, 12))
+	defer origin.close()
+
+	pr, _ := newTestProber(dashAST.Add(time.Hour))
+	cap := &capture{}
+	pr.notifier = cap
+	pr.ProbeTarget(context.Background(), config.Target{Name: "live", URL: origin.url()})
+
+	f, ok := cap.find("timeline_gap")
+	if !ok {
+		t.Fatalf("a 12s hole in the timeline went unreported: %+v", cap.findings)
+	}
+	if f.Severity != alert.Critical {
+		t.Errorf("severity = %s, want critical for a hole of three whole segments", f.Severity)
+	}
+	if !strings.Contains(f.Message, "12.0s") {
+		t.Errorf("message does not say how big the hole is: %q", f.Message)
+	}
+}
+
+// The mirror image, and the one that matters more: a continuous timeline must
+// never be reported, or the check is an alarm nobody trusts.
+func TestContinuousTimelineIsSilent(t *testing.T) {
+	origin := newMutableOrigin(gappyMPD(liveEdgeTick(0), 5, 0))
+	defer origin.close()
+
+	pr, _ := newTestProber(dashAST.Add(time.Hour))
+	cap := &capture{}
+	pr.notifier = cap
+	pr.ProbeTarget(context.Background(), config.Target{Name: "live", URL: origin.url()})
+
+	if cap.has("timeline_gap") || cap.has("timeline_overlap") {
+		t.Fatalf("two runs that meet exactly were reported as broken: %+v", cap.findings)
+	}
+}
+
+// A break smaller than a segment is a defect worth knowing about; one at least
+// a segment long is a stall a viewer sees.
+func TestTimelineGapSeverityIsGradedAgainstTheSegment(t *testing.T) {
+	origin := newMutableOrigin(gappyMPD(liveEdgeTick(0), 5, 2))
+	defer origin.close()
+
+	pr, _ := newTestProber(dashAST.Add(time.Hour))
+	cap := &capture{}
+	pr.notifier = cap
+	pr.ProbeTarget(context.Background(), config.Target{Name: "live", URL: origin.url()})
+
+	f, ok := cap.find("timeline_gap")
+	if !ok {
+		t.Fatalf("a 2s hole went unreported: %+v", cap.findings)
+	}
+	if f.Severity != alert.Warning {
+		t.Errorf("severity = %s, want warning for half a 4s segment", f.Severity)
+	}
+}
+
+// A break that has scrolled out of the DVR is history. Reporting it every poll
+// until the packager trims it would say a stream is broken long after the hole
+// stopped being reachable.
+func TestBreaksOutsideTheWindowAreNotReported(t *testing.T) {
+	// The hole sits an hour back, far outside a 60s timeShiftBufferDepth.
+	body := fmt.Sprintf(`<MPD xmlns="urn:mpeg:dash:schema:mpd:2011" type="dynamic"
+	   availabilityStartTime="2026-01-01T00:00:00Z" minimumUpdatePeriod="PT4S"
+	   timeShiftBufferDepth="PT60S">
+	  <Period id="p0" start="PT0S"><AdaptationSet contentType="video" mimeType="video/mp4">
+	    <SegmentTemplate media="v/$Time$.m4s" timescale="1" startNumber="1">
+	      <SegmentTimeline><S t="0" d="4" r="2"/><S t="1000" d="4" r="%d"/></SegmentTimeline>
+	    </SegmentTemplate>
+	    <Representation id="v0" bandwidth="1"/>
+	  </AdaptationSet></Period></MPD>`, (liveEdgeTick(0)-1000)/4-1)
+	origin := newMutableOrigin(body)
+	defer origin.close()
+
+	pr, _ := newTestProber(dashAST.Add(time.Hour))
+	cap := &capture{}
+	pr.notifier = cap
+	pr.ProbeTarget(context.Background(), config.Target{Name: "live", URL: origin.url()})
+
+	if cap.has("timeline_gap") {
+		t.Fatalf("a hole an hour outside the DVR window was reported: %+v", cap.findings)
+	}
+}
+
+// dvrMPD declares a DVR depth and offers a window of n 4s segments, which is
+// how a packager that has just restarted looks: healthy at the edge, with
+// nothing behind it.
+func dvrMPD(edgeTick, n int, depth string) string {
+	return fmt.Sprintf(`<MPD xmlns="urn:mpeg:dash:schema:mpd:2011" type="dynamic"
+	   availabilityStartTime="2026-01-01T00:00:00Z" minimumUpdatePeriod="PT4S"
+	   timeShiftBufferDepth="%s">
+	  <Period id="p0" start="PT0S"><AdaptationSet contentType="video" mimeType="video/mp4">
+	    <SegmentTemplate media="v/$Time$.m4s" timescale="1" startNumber="1">
+	      <SegmentTimeline><S t="%d" d="4" r="%d"/></SegmentTimeline>
+	    </SegmentTemplate>
+	    <Representation id="v0" bandwidth="1"/>
+	  </AdaptationSet></Period></MPD>`, depth, edgeTick-4*n, n-1)
+}
+
+// The promise is in the document, so this needs no configuration: seek back
+// this far, the manifest says, and the segments will be there.
+func TestWindowBelowDeclaredDepth(t *testing.T) {
+	origin := newMutableOrigin(dvrMPD(liveEdgeTick(0), 5, "PT10M")) // 20s of a promised 600s
+	defer origin.close()
+
+	pr, _ := newTestProber(dashAST.Add(time.Hour))
+	cap := &capture{}
+	pr.notifier = cap
+	pr.ProbeTarget(context.Background(), config.Target{Name: "live", URL: origin.url()})
+
+	f, ok := cap.find("window_below_declared")
+	if !ok {
+		t.Fatalf("20s of a promised 600s DVR went unreported: %+v", cap.findings)
+	}
+	if !strings.Contains(f.Message, "600.0s") || !strings.Contains(f.Message, "20.0s") {
+		t.Errorf("message does not compare the promise with the reality: %q", f.Message)
+	}
+}
+
+// A live window is legitimately a little short of the promise: the oldest
+// segment expires while the newest is still being produced.
+func TestWindowSlightlyShortOfTheDepthIsSilent(t *testing.T) {
+	origin := newMutableOrigin(dvrMPD(liveEdgeTick(0), 29, "PT2M")) // 116s of a promised 120s
+	defer origin.close()
+
+	pr, _ := newTestProber(dashAST.Add(time.Hour))
+	cap := &capture{}
+	pr.notifier = cap
+	pr.ProbeTarget(context.Background(), config.Target{Name: "live", URL: origin.url()})
+
+	if cap.has("window_below_declared") {
+		t.Fatalf("116s of a promised 120s was reported: %+v", cap.findings)
+	}
+}
+
+// A static presentation has no DVR window to fall short of.
+func TestDeclaredDepthIsNotCheckedOnStatic(t *testing.T) {
+	body := `<MPD xmlns="urn:mpeg:dash:schema:mpd:2011" type="static"
+	   timeShiftBufferDepth="PT10M" mediaPresentationDuration="PT20S">
+	  <Period id="p0" start="PT0S"><AdaptationSet contentType="video" mimeType="video/mp4">
+	    <SegmentTemplate media="v/$Time$.m4s" timescale="1" startNumber="1">
+	      <SegmentTimeline><S t="0" d="4" r="4"/></SegmentTimeline>
+	    </SegmentTemplate>
+	    <Representation id="v0" bandwidth="1"/>
+	  </AdaptationSet></Period></MPD>`
+	origin := newMutableOrigin(body)
+	defer origin.close()
+
+	pr, _ := newTestProber(dashAST.Add(time.Hour))
+	cap := &capture{}
+	pr.notifier = cap
+	pr.ProbeTarget(context.Background(), config.Target{Name: "live", URL: origin.url()})
+
+	if cap.has("window_below_declared") {
+		t.Fatalf("a static presentation was held to a DVR promise: %+v", cap.findings)
+	}
+}
+
+// Players size their buffers from @maxSegmentDuration, so a segment longer
+// than it is a rebuffer on a stream whose every request succeeded.
+func TestSegmentLongerThanDeclaredMaximum(t *testing.T) {
+	body := fmt.Sprintf(`<MPD xmlns="urn:mpeg:dash:schema:mpd:2011" type="dynamic"
+	   availabilityStartTime="2026-01-01T00:00:00Z" minimumUpdatePeriod="PT4S"
+	   maxSegmentDuration="PT4S" timeShiftBufferDepth="PT1H">
+	  <Period id="p0" start="PT0S"><AdaptationSet contentType="video" mimeType="video/mp4">
+	    <SegmentTemplate media="v/$Time$.m4s" timescale="1" startNumber="1">
+	      <SegmentTimeline><S t="%d" d="4" r="2"/><S d="11"/></SegmentTimeline>
+	    </SegmentTemplate>
+	    <Representation id="v0" bandwidth="1"/>
+	  </AdaptationSet></Period></MPD>`, liveEdgeTick(0)-23)
+	origin := newMutableOrigin(body)
+	defer origin.close()
+
+	pr, _ := newTestProber(dashAST.Add(time.Hour))
+	cap := &capture{}
+	pr.notifier = cap
+	pr.ProbeTarget(context.Background(), config.Target{Name: "live", URL: origin.url()})
+
+	f, ok := cap.find("segment_duration_violation")
+	if !ok {
+		t.Fatalf("an 11s segment under a 4s declared maximum went unreported: %+v", cap.findings)
+	}
+	if !strings.Contains(f.Message, "11.0s") || !strings.Contains(f.Message, "4.0s") {
+		t.Errorf("message does not give both durations: %q", f.Message)
+	}
+}
+
+// Segments at exactly the declared maximum are what a correct packager emits,
+// and every poll of every healthy stream would report one if this were wrong.
+func TestSegmentAtTheDeclaredMaximumIsSilent(t *testing.T) {
+	origin := newMutableOrigin(strings.Replace(
+		dvrMPD(liveEdgeTick(0), 5, "PT1H"), `minimumUpdatePeriod="PT4S"`,
+		`minimumUpdatePeriod="PT4S" maxSegmentDuration="PT4S"`, 1))
+	defer origin.close()
+
+	pr, _ := newTestProber(dashAST.Add(time.Hour))
+	cap := &capture{}
+	pr.notifier = cap
+	pr.ProbeTarget(context.Background(), config.Target{Name: "live", URL: origin.url()})
+
+	if cap.has("segment_duration_violation") {
+		t.Fatalf("4s segments under a 4s declared maximum were reported: %+v", cap.findings)
+	}
+}
+
+// periodsMPD is two periods, the first declaring both its start and its
+// length, which is the form a server-side ad stitcher writes.
+func periodsMPD(firstDuration, secondStart string) string {
+	return fmt.Sprintf(`<MPD xmlns="urn:mpeg:dash:schema:mpd:2011" type="static"
+	   mediaPresentationDuration="PT1H">
+	  <Period id="content-1" start="PT0S" duration="%s">
+	    <AdaptationSet contentType="video" mimeType="video/mp4">
+	    <SegmentTemplate media="a/$Number$.m4s" timescale="1" duration="4" startNumber="1"/>
+	    <Representation id="v0" bandwidth="1"/></AdaptationSet></Period>
+	  <Period id="ad-break-1" start="%s">
+	    <AdaptationSet contentType="video" mimeType="video/mp4">
+	    <SegmentTemplate media="b/$Number$.m4s" timescale="1" duration="4" startNumber="1"/>
+	    <Representation id="v0" bandwidth="1"/></AdaptationSet></Period></MPD>`,
+		firstDuration, secondStart)
+}
+
+func probePeriods(t *testing.T, body string) *capture {
+	t.Helper()
+	origin := newMutableOrigin(body)
+	defer origin.close()
+
+	pr, _ := newTestProber(dashAST)
+	cap := &capture{}
+	pr.notifier = cap
+	pr.ProbeTarget(context.Background(), config.Target{Name: "vod", URL: origin.url()})
+	return cap
+}
+
+// Where server-side ad insertion goes wrong: the stitcher's arithmetic leaves
+// a hole, and players stall at the boundary -- which viewers experience as the
+// stream dying exactly when the ad starts.
+func TestPeriodGapIsReported(t *testing.T) {
+	cap := probePeriods(t, periodsMPD("PT30S", "PT32S"))
+
+	f, ok := cap.find("period_gap")
+	if !ok {
+		t.Fatalf("a 2s hole at a period boundary went unreported: %+v", cap.findings)
+	}
+	if f.Severity != alert.Critical {
+		t.Errorf("severity = %s, want critical for a 2s hole", f.Severity)
+	}
+	if !strings.Contains(f.Message, "content-1") || !strings.Contains(f.Message, "ad-break-1") {
+		t.Errorf("message does not name the boundary: %q", f.Message)
+	}
+}
+
+func TestPeriodOverlapIsReported(t *testing.T) {
+	cap := probePeriods(t, periodsMPD("PT30S", "PT28S"))
+
+	f, ok := cap.find("period_overlap")
+	if !ok {
+		t.Fatalf("a 2s overlap at a period boundary went unreported: %+v", cap.findings)
+	}
+	if cap.has("period_gap") {
+		t.Errorf("an overlap was also reported as a gap: %+v", cap.findings)
+	}
+	if !strings.Contains(f.Message, "2.0s") {
+		t.Errorf("message does not say how big the overlap is: %q", f.Message)
+	}
+}
+
+// Periods that meet exactly are the overwhelming majority, and reporting them
+// would make the check worthless.
+func TestAdjacentPeriodsAreSilent(t *testing.T) {
+	if cap := probePeriods(t, periodsMPD("PT30S", "PT30S")); cap.has("period_gap") || cap.has("period_overlap") {
+		t.Fatalf("periods that meet exactly were reported: %+v", cap.findings)
+	}
+}
+
+// A frame at 24fps is 41ms. Below that there is no frame for a player to miss,
+// and the number is a stitcher rounding its arithmetic.
+func TestSubFramePeriodDisagreementIsSilent(t *testing.T) {
+	if cap := probePeriods(t, periodsMPD("PT30S", "PT30.02S")); cap.has("period_gap") {
+		t.Fatalf("a 20ms boundary disagreement was reported: %+v", cap.findings)
+	}
+}
+
+// Where @start is absent the parser derives it from the previous period's
+// duration. Comparing that against the duration it came from is comparing our
+// own arithmetic to itself: it can only ever agree, which would look like
+// coverage while checking nothing.
+func TestDerivedPeriodTimesAreNotCompared(t *testing.T) {
+	body := `<MPD xmlns="urn:mpeg:dash:schema:mpd:2011" type="static"
+	   mediaPresentationDuration="PT1H">
+	  <Period id="content-1" start="PT0S" duration="PT30S">
+	    <AdaptationSet contentType="video" mimeType="video/mp4">
+	    <SegmentTemplate media="a/$Number$.m4s" timescale="1" duration="4" startNumber="1"/>
+	    <Representation id="v0" bandwidth="1"/></AdaptationSet></Period>
+	  <Period id="ad-break-1">
+	    <AdaptationSet contentType="video" mimeType="video/mp4">
+	    <SegmentTemplate media="b/$Number$.m4s" timescale="1" duration="4" startNumber="1"/>
+	    <Representation id="v0" bandwidth="1"/></AdaptationSet></Period></MPD>`
+	if cap := probePeriods(t, body); cap.has("period_gap") || cap.has("period_overlap") {
+		t.Fatalf("derived period times were compared: %+v", cap.findings)
+	}
+}
+
+// A period without an @id is named by its position, because a finding that
+// cannot say where the fault is does not help anyone.
+func TestUnnamedPeriodsAreNamedByPosition(t *testing.T) {
+	body := strings.ReplaceAll(periodsMPD("PT30S", "PT40S"), ` id="content-1"`, "")
+	body = strings.ReplaceAll(body, ` id="ad-break-1"`, "")
+
+	f, ok := probePeriods(t, body).find("period_gap")
+	if !ok {
+		t.Fatal("a 10s hole between unnamed periods went unreported")
+	}
+	if !strings.Contains(f.Message, "#1") || !strings.Contains(f.Message, "#2") {
+		t.Errorf("message does not locate the boundary: %q", f.Message)
+	}
+}
+
+// On a short DVR the proportional allowance is smaller than the churn at the
+// two ends of the window: a quarter of 20s is 5s, which is barely one 4s
+// segment. A stream promising 20s and offering 12s is two segments short, and
+// two segments is what the oldest expiring and the newest still being produced
+// costs.
+func TestShortDVRAllowanceIsAtLeastTwoSegments(t *testing.T) {
+	origin := newMutableOrigin(dvrMPD(liveEdgeTick(0), 3, "PT20S")) // 12s of a promised 20s
+	defer origin.close()
+
+	pr, _ := newTestProber(dashAST.Add(time.Hour))
+	cap := &capture{}
+	pr.notifier = cap
+	pr.ProbeTarget(context.Background(), config.Target{Name: "live", URL: origin.url()})
+
+	if cap.has("window_below_declared") {
+		t.Fatalf("12s of a promised 20s -- two segments of churn -- was reported: %+v", cap.findings)
+	}
+}
+
+// The same allowance must not swallow a genuinely collapsed window.
+func TestShortDVRStillCatchesACollapse(t *testing.T) {
+	origin := newMutableOrigin(dvrMPD(liveEdgeTick(0), 1, "PT20S")) // 4s of a promised 20s
+	defer origin.close()
+
+	pr, _ := newTestProber(dashAST.Add(time.Hour))
+	cap := &capture{}
+	pr.notifier = cap
+	pr.ProbeTarget(context.Background(), config.Target{Name: "live", URL: origin.url()})
+
+	if !cap.has("window_below_declared") {
+		t.Fatalf("4s of a promised 20s went unreported: %+v", cap.findings)
+	}
+}
+
+// The mirror of the floor: on a long DVR the allowance is proportional, since
+// two segments of a ten-minute window is no allowance at all. Eight minutes of
+// a promised ten is churn, not a collapse.
+func TestLongDVRAllowanceIsProportional(t *testing.T) {
+	origin := newMutableOrigin(dvrMPD(liveEdgeTick(0), 120, "PT10M")) // 480s of a promised 600s
+	defer origin.close()
+
+	pr, _ := newTestProber(dashAST.Add(time.Hour))
+	cap := &capture{}
+	pr.notifier = cap
+	pr.ProbeTarget(context.Background(), config.Target{Name: "live", URL: origin.url()})
+
+	if cap.has("window_below_declared") {
+		t.Fatalf("480s of a promised 600s was reported: %+v", cap.findings)
+	}
+}
+
+// multiPeriodLiveMPD is a live presentation whose DVR spans a period boundary:
+// a completed 30s period and a live one, together the 60s the manifest
+// promises. This is every stream that has just crossed an ad break.
+func multiPeriodLiveMPD() string {
+	seg := `<SegmentTemplate media="$RepresentationID$/$Time$.m4s" timescale="1" startNumber="1">
+	      <SegmentTimeline><S t="0" d="6" r="4"/></SegmentTimeline></SegmentTemplate>`
+	return fmt.Sprintf(`<MPD xmlns="urn:mpeg:dash:schema:mpd:2011" type="dynamic"
+	   availabilityStartTime="2026-01-01T00:00:00Z" minimumUpdatePeriod="PT6S"
+	   timeShiftBufferDepth="PT60S">
+	  <Period id="content-1" start="PT3540S" duration="PT30S">
+	    <AdaptationSet contentType="video" mimeType="video/mp4">%s
+	    <Representation id="v0" bandwidth="1"/></AdaptationSet></Period>
+	  <Period id="ad-break-1" start="PT3570S">
+	    <AdaptationSet contentType="video" mimeType="video/mp4">%s
+	    <Representation id="v0" bandwidth="1"/></AdaptationSet></Period></MPD>`, seg, seg)
+}
+
+// The promise is made by the presentation, not by whichever period holds the
+// live edge. Measuring one period against it reported every multi-period live
+// stream as broken, which is how this was found -- against livesim2, not in a
+// test.
+func TestDVRSpanningPeriodsIsNotShort(t *testing.T) {
+	origin := newMutableOrigin(multiPeriodLiveMPD())
+	defer origin.close()
+
+	pr, _ := newTestProber(dashAST.Add(time.Hour))
+	cap := &capture{}
+	pr.notifier = cap
+	pr.ProbeTarget(context.Background(), config.Target{Name: "live", URL: origin.url()})
+
+	if f, ok := cap.find("window_below_declared"); ok {
+		t.Fatalf("two 30s periods covering the promised 60s were reported: %q", f.Message)
+	}
+}
+
+// One finding for a presentation-wide promise, not one per representation.
+func TestDVRShortfallIsReportedOncePerTarget(t *testing.T) {
+	origin := newMutableOrigin(strings.ReplaceAll(
+		multiPeriodLiveMPD(), `timeShiftBufferDepth="PT60S"`, `timeShiftBufferDepth="PT10M"`))
+	defer origin.close()
+
+	pr, _ := newTestProber(dashAST.Add(time.Hour))
+	cap := &capture{}
+	pr.notifier = cap
+	pr.ProbeTarget(context.Background(), config.Target{Name: "live", URL: origin.url()})
+
+	var n int
+	for _, f := range cap.findings {
+		if f.Check == "window_below_declared" {
+			n++
+			if f.Variant != "" {
+				t.Errorf("finding is labelled with variant %q, but the promise is the presentation's", f.Variant)
+			}
+		}
+	}
+	if n != 1 {
+		t.Errorf("window_below_declared fired %d times, want once: %+v", n, cap.findings)
+	}
+}
+
+// When nothing is available at all, no_segments is the finding that matters.
+// Adding "the DVR is 0s short of its promise" on top of it says nothing new
+// and buries the one that does.
+func TestNoSegmentsIsNotAlsoAShortWindow(t *testing.T) {
+	// A timeline that starts an hour after the live edge: nothing is fetchable.
+	body := `<MPD xmlns="urn:mpeg:dash:schema:mpd:2011" type="dynamic"
+	   availabilityStartTime="2026-01-01T00:00:00Z" minimumUpdatePeriod="PT4S"
+	   timeShiftBufferDepth="PT60S">
+	  <Period id="p0" start="PT0S"><AdaptationSet contentType="video" mimeType="video/mp4">
+	    <SegmentTemplate media="v/$Time$.m4s" timescale="1" startNumber="1">
+	      <SegmentTimeline><S t="7200" d="4" r="4"/></SegmentTimeline>
+	    </SegmentTemplate>
+	    <Representation id="v0" bandwidth="1"/>
+	  </AdaptationSet></Period></MPD>`
+	origin := newMutableOrigin(body)
+	defer origin.close()
+
+	pr, _ := newTestProber(dashAST.Add(time.Hour))
+	cap := &capture{}
+	pr.notifier = cap
+	pr.ProbeTarget(context.Background(), config.Target{Name: "live", URL: origin.url()})
+
+	if !cap.has("no_segments") {
+		t.Fatalf("nothing was available and no_segments did not fire: %+v", cap.findings)
+	}
+	if f, ok := cap.find("window_below_declared"); ok {
+		t.Errorf("an empty window was also reported as a short DVR: %q", f.Message)
 	}
 }

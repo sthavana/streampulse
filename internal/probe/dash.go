@@ -67,6 +67,8 @@ func (p *Prober) probeRepresentation(ctx context.Context, t config.Target, r *da
 	}
 
 	last := segs[len(segs)-1]
+	p.reg.SetGauge("streampulse_timeline_breaks", helpTimelineBreaks,
+		float64(len(breaksInWindow(r, segs))), labels)
 	p.reg.SetGauge("streampulse_media_sequence", helpSequence, float64(last.Number), labels)
 	p.reg.SetGauge("streampulse_playlist_window_seconds", helpWindow, (last.End() - segs[0].Start).Seconds(), labels)
 

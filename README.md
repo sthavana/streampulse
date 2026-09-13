@@ -97,8 +97,8 @@ open, and both times a macOS run reported everything green.
 | | |
 |---|---|
 | **Availability** | manifests and segments that 404, time out, or return something that is not a manifest |
-| **Liveness** | frozen live edges, timelines going backwards, windows shorter than declared, edges drifting behind wall clock |
-| **Structure** | spec violations, dangling rendition groups, missing initialisation sections, empty playlists |
+| **Liveness** | frozen live edges, timelines going backwards, less DVR than the manifest promises, edges drifting behind wall clock |
+| **Structure** | spec violations, dangling rendition groups, missing initialisation sections, empty playlists, holes and overlaps in a DASH timeline or at a period boundary |
 | **DRM** | unretrievable keys, clear segments on an encrypted stream, malformed PSSH, keys that stopped rotating |
 | **Low latency** | chunked delivery silently degraded to whole-segment buffering, latency past the declared bound |
 | **The media itself** | codec and resolution that disagree with the manifest, declared tracks that are not there, black or frozen video, silent audio; a picture and level per stream *(optional, needs ffprobe/ffmpeg)* |
@@ -319,6 +319,55 @@ windows and metrics as the HLS path.
 | `discontinuity_present` | info | More than one period (each boundary is a splice point) |
 | `chunked_delivery_missing` | warning | A low-latency stream is being delivered as whole buffered segments |
 | `utc_timing_missing` | warning | Low-latency stream declares no `UTCTiming` |
+| `timeline_gap` | critical/warning | A hole in a `SegmentTimeline`: media time nobody can request |
+| `timeline_overlap` | critical/warning | Two runs of segments claiming the same media time |
+| `period_gap` | critical/warning | A hole at a period boundary -- where SSAI stitching goes wrong |
+| `period_overlap` | critical/warning | A period starting before the previous one ends |
+| `window_below_declared` | warning | Less DVR than `@timeShiftBufferDepth` promises |
+| `segment_duration_violation` | warning | A segment longer than `@maxSegmentDuration` |
+
+### What the manifest promises, and whether it is true
+
+The last six of those are a different kind of check from the rest. Everything
+above them asks whether the CDN answered; these ask whether the document is
+self-consistent -- and every number they compare against is one the packager
+put in the manifest itself, so none of them needs configuring.
+
+- **A timeline is a contract about media time.** Each `S` states a start `@t`,
+  a duration `@d` and a repeat count `@r`, and the next run is expected to
+  begin exactly where the last one ended. When it does not, the presentation
+  has a hole in it or two segments claiming the same instant, and a player
+  reaching that point stalls or skips. Nothing else sees this: every segment
+  listed fetches, the manifest parses, the edge advances. Severity is graded
+  against the segment length, because 200ms is a rounding error on 6s segments
+  and most of a segment on a 320ms low-latency one.
+
+  An open-ended run (`@r="-1"`) ends wherever the next run says it does, so a
+  boundary after one is never reported -- otherwise every correct live manifest
+  written that way would fire. A packager that drops a segment without
+  restating `@t` produces no gap here, and does not need to: the segment is
+  simply absent, which `segment_availability` catches when it 404s.
+
+- **Period boundaries are where server-side ad insertion goes wrong.** A
+  stitcher writes the new period's `@start` and the previous period's
+  `@duration`, and if its arithmetic is off the presentation has a hole at
+  exactly the moment the break begins -- which viewers experience as the stream
+  dying when the ad starts. Only periods that state both numbers are compared:
+  where `@start` is absent the parser derives it from the previous duration,
+  and comparing that against the number it came from would look like coverage
+  while checking nothing.
+
+- **`@timeShiftBufferDepth` is a promise**: seek back this far and the segments
+  will be there. A packager that has restarted, or a CDN whose older objects
+  were purged, offers a fraction of it while looking perfectly healthy at the
+  live edge. The first anyone hears of it is a viewer pausing and finding they
+  cannot resume. The measurement spans periods, because the promise is made by
+  the presentation and a stream that has just crossed an ad break has most of
+  its DVR in the period behind it -- measuring one period against it reported
+  every multi-period live stream as broken, which is how that was found.
+
+- **`@maxSegmentDuration` is what players size their buffers from.** A segment
+  longer than it is a rebuffer on a stream whose every request succeeded.
 
 `edge_stale` is the DASH counterpart of HLS's `pdt_stale`. The names differ
 because `pdt_stale` names a tag DASH does not have; they could be unified under
@@ -1002,6 +1051,7 @@ somewhere private, as you would for `/metrics` itself.
 `streampulse_segment_available`, `streampulse_segment_ttfb_seconds`,
 `streampulse_variant_count`, `streampulse_rendition_count`,
 `streampulse_period_count`, `streampulse_representation_count`,
+`streampulse_timeline_breaks`,
 `streampulse_findings_total`,
 `streampulse_key_count`, `streampulse_key_available`,
 `streampulse_init_segment_available`, `streampulse_chunked_delivery`,
@@ -1157,5 +1207,6 @@ Packages: `hls` and `dash` (manifest parsers), `probe` (prober + checks),
 MVP. Media inspection is optional and off by default; everything else is
 standard library only. The HLS path is implemented and tested end to end
 (`make test`). DASH is
-probed for reachability, segment availability, live-edge progression and the
-DRM its manifest declares. Not yet production-hardened.
+probed for reachability, segment availability, live-edge progression, the DRM
+its manifest declares, and the promises the MPD makes about its own timeline,
+periods, DVR depth and segment durations. Not yet production-hardened.

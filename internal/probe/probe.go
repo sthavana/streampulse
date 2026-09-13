@@ -28,6 +28,7 @@ const (
 	helpProbeUp        = "1 if the target manifest is reachable"
 	helpManifestFetch  = "Time to fetch the top-level manifest"
 	helpSequence       = "Live-edge sequence (EXT-X-MEDIA-SEQUENCE, or the newest DASH segment number)"
+	helpTimelineBreaks = "Holes and overlaps in the fetchable part of a DASH SegmentTimeline"
 	helpWindow         = "Length of the live/DVR window in seconds"
 	helpSegmentCount   = "Segments in the current window"
 	helpSegmentUp      = "1 if a sampled segment is fetchable"
