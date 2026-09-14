@@ -307,7 +307,18 @@ func declaredLatency(m *dash.MPD) string {
 // edgeKey identifies one representation's edge state across polls. The target
 // URL is part of it because a representation id is only unique within its own
 // manifest.
-func edgeKey(t config.Target, variant string) string { return t.URL + "#" + variant }
+// edgeKey identifies one representation of one target across polls.
+//
+// The target's *name* leads, not its URL. Two targets legitimately share a
+// URL -- the same stream probed at two intervals, one with media inspection
+// and one without, one origin reached two ways -- and keying on the URL made
+// them share cross-poll state. A live soak found it: the faster target
+// advanced the edge, so the slower one measured its own perfectly good
+// manifest against a newer reading and reported a rollback of exactly one
+// segment, seven times in twenty-eight hours. The costlier half never showed
+// up in that run: a frozen edge on one target is reported as a rollback and
+// never as a stall, because the other target keeps moving the timestamp on.
+func edgeKey(t config.Target, variant string) string { return t.Name + "#" + t.URL + "#" + variant }
 
 // breaksInWindow returns the timeline discontinuities that still matter: the
 // ones inside the segments a player can currently fetch.

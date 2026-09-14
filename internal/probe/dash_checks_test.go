@@ -1101,3 +1101,102 @@ func TestNoSegmentsIsNotAlsoAShortWindow(t *testing.T) {
 		t.Errorf("an empty window was also reported as a short DVR: %q", f.Message)
 	}
 }
+
+// scriptedOrigin serves a different manifest to each successive request, which
+// is how a CDN with more than one edge node behaves: two probes of the same
+// URL, moments apart, can legitimately be answered from copies that are not
+// the same age.
+type scriptedOrigin struct {
+	mu  sync.Mutex
+	n   int
+	fn  func(request int) string
+	srv *httptest.Server
+}
+
+func newScriptedOrigin(fn func(request int) string) *scriptedOrigin {
+	o := &scriptedOrigin{fn: fn}
+	o.srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/manifest.mpd" {
+			_, _ = w.Write([]byte("\x00\x00"))
+			return
+		}
+		o.mu.Lock()
+		body := o.fn(o.n)
+		o.n++
+		o.mu.Unlock()
+		_, _ = w.Write([]byte(body))
+	}))
+	return o
+}
+
+func (o *scriptedOrigin) url() string { return o.srv.URL + "/manifest.mpd" }
+func (o *scriptedOrigin) close()      { o.srv.Close() }
+
+// Two targets may point at the same URL: the same stream probed at two
+// intervals, or one with media inspection on and one without, or one origin
+// reached two ways. They are different targets, and their cross-poll state
+// must not be shared.
+//
+// Here each target's own readings only ever move forwards -- one consistently
+// lands on the fresher edge, the other on the edge a segment behind it --
+// so neither has rolled back and neither should be reported.
+func TestTargetsSharingAURLDoNotShareEdgeState(t *testing.T) {
+	base := liveEdgeTick(0)
+	origin := newScriptedOrigin(func(req int) string {
+		round := req / 2
+		if req%2 == 0 {
+			return timelineMPD(base+4*round, 10) // the fast target's edge
+		}
+		return timelineMPD(base+4*round-4, 10) // the slow target's, one behind
+	})
+	defer origin.close()
+
+	pr, clk := newTestProber(dashAST.Add(time.Hour))
+	cap := &capture{}
+	pr.notifier = cap
+	fast := config.Target{Name: "fast", URL: origin.url()}
+	slow := config.Target{Name: "slow", URL: origin.url()}
+
+	for i := 0; i < 4; i++ {
+		pr.ProbeTarget(context.Background(), fast)
+		pr.ProbeTarget(context.Background(), slow)
+		clk.advance(4 * time.Second)
+	}
+
+	if f, ok := cap.find("playlist_rollback"); ok {
+		t.Fatalf("a target was measured against another target's poll: %q", f.Message)
+	}
+}
+
+// The costlier half of the same bug. One edge node stops publishing while
+// another carries on; the target watching the frozen one must report it. With
+// the state shared, the healthy target keeps moving the edge forward, so the
+// freeze is never counted against the target that can see it -- a fault that
+// goes unreported is worse than one reported twice.
+func TestAFreezeIsNotMaskedByAnotherTargetOnTheSameURL(t *testing.T) {
+	base := liveEdgeTick(0)
+	origin := newScriptedOrigin(func(req int) string {
+		if req%2 == 0 {
+			return timelineMPD(base+4*(req/2), 10) // healthy edge, advancing
+		}
+		return timelineMPD(base, 10) // frozen edge, never moves
+	})
+	defer origin.close()
+
+	pr, clk := newTestProber(dashAST.Add(time.Hour))
+	cap := &capture{}
+	pr.notifier = cap
+	healthy := config.Target{Name: "healthy", URL: origin.url()}
+	stuck := config.Target{Name: "stuck", URL: origin.url()}
+
+	// The stall threshold is three 4s segments; six rounds of 5s clears it.
+	for i := 0; i < 6; i++ {
+		pr.ProbeTarget(context.Background(), healthy)
+		pr.ProbeTarget(context.Background(), stuck)
+		clk.advance(5 * time.Second)
+	}
+
+	if !cap.has("playlist_stalled") {
+		t.Fatalf("a frozen edge went unreported because another target kept moving: %+v", cap.findings)
+	}
+}

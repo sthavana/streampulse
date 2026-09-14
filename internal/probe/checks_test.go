@@ -326,3 +326,49 @@ func TestSparsePDTFrozenTimelineStillWarns(t *testing.T) {
 		t.Fatalf("expected pdt_not_advancing on a frozen timeline, got %v", checks(fs))
 	}
 }
+
+// --- two targets, one playlist URL ---
+
+// The DASH side of this was found by a live soak: cross-poll state keyed by
+// URL is shared between targets that happen to point at the same one. HLS
+// keeps the same kind of state, so it had the same bug.
+//
+// Each target's own readings only ever move forwards here -- one lands on the
+// fresher edge every time, the other on the edge one segment behind it, which
+// is what two CDN nodes look like -- so neither has rolled back.
+func TestHLSTargetsSharingAPlaylistDoNotShareState(t *testing.T) {
+	anchor := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	pr, clk := newTestProber(anchor.Add(36 * time.Second))
+	fast := config.Target{Name: "fast", ExpectLive: true}
+	slow := config.Target{Name: "slow", ExpectLive: true}
+
+	for i := 0; i < 4; i++ {
+		pr.runChecks(fast, "u", "v", livePlaylist(100+i, 6, 6, 6.0, nil), cacheInfo{})
+		fs := pr.runChecks(slow, "u", "v", livePlaylist(99+i, 6, 6, 6.0, nil), cacheInfo{})
+		if hasCheck(fs, "playlist_rollback") {
+			t.Fatalf("round %d: a target was measured against another target's poll: %v", i, checks(fs))
+		}
+		clk.advance(6 * time.Second)
+	}
+}
+
+// The costlier half: one edge stops publishing while another carries on. With
+// the state shared, the healthy target keeps the sequence moving, so the
+// freeze is never counted against the target that can see it.
+func TestHLSFreezeIsNotMaskedByAnotherTarget(t *testing.T) {
+	anchor := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	pr, clk := newTestProber(anchor.Add(36 * time.Second))
+	healthy := config.Target{Name: "healthy", ExpectLive: true}
+	stuck := config.Target{Name: "stuck", ExpectLive: true}
+
+	var last []alert.Finding
+	// Threshold is 3 x TARGETDURATION = 18s.
+	for i := 0; i < 5; i++ {
+		pr.runChecks(healthy, "u", "v", livePlaylist(100+i, 6, 6, 6.0, nil), cacheInfo{})
+		last = pr.runChecks(stuck, "u", "v", livePlaylist(100, 6, 6, 6.0, nil), cacheInfo{})
+		clk.advance(6 * time.Second)
+	}
+	if !hasCheck(last, "playlist_stalled") {
+		t.Fatalf("a frozen playlist went unreported because another target kept moving: %v", checks(last))
+	}
+}

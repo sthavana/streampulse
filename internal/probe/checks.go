@@ -94,11 +94,11 @@ func (p *Prober) crossPollChecks(now time.Time, t config.Target, plURL, variant 
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
-	st := p.state[plURL]
+	st := p.state[stateKey(t, plURL)]
 	if st == nil {
 		// First sighting: record a baseline. There is nothing to compare against
 		// yet, so no cross-poll rule can fire.
-		p.state[plURL] = &plState{lastSequence: pl.MediaSequence, lastSeqChange: now, lastEdge: edge}
+		p.state[stateKey(t, plURL)] = &plState{lastSequence: pl.MediaSequence, lastSeqChange: now, lastEdge: edge}
 		return out
 	}
 
@@ -206,3 +206,8 @@ func itoa(i int) string { return strconv.Itoa(i) }
 func i64toa(i int64) string { return strconv.FormatInt(i, 10) }
 
 func ftoa(f float64) string { return strconv.FormatFloat(f, 'f', 1, 64) }
+
+// stateKey identifies one media playlist of one target across polls. The
+// target's name leads for the same reason it does in edgeKey: two targets may
+// point at the same playlist, and they are still two targets.
+func stateKey(t config.Target, plURL string) string { return t.Name + "#" + plURL }

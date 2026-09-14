@@ -137,10 +137,10 @@ func (p *Prober) rotationCheck(now time.Time, t config.Target, plURL, variant st
 
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	st := p.state[plURL]
+	st := p.state[stateKey(t, plURL)]
 	if st == nil {
 		st = &plState{lastSeqChange: now}
-		p.state[plURL] = st
+		p.state[stateKey(t, plURL)] = st
 	}
 	if st.lastKeyID != id {
 		st.lastKeyID = id
