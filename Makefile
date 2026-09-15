@@ -1,7 +1,8 @@
-.PHONY: build run test vet fmt check check-linux docker docker-full compose-up compose-up-full compose-down clean
+.PHONY: build run test vet fmt check check-linux docker docker-full docker-mosaic compose-up compose-up-full compose-down clean
 
 build:
 	go build -o bin/prober ./cmd/prober
+	go build -o bin/mosaic ./cmd/mosaic
 
 run: build
 	./bin/prober -config config.json
@@ -35,6 +36,11 @@ docker:
 # The inspection image: same binary, on a base that has ffprobe.
 docker-full:
 	docker build -f Dockerfile.full -t streampulse:dev-full .
+
+# The multiviewer: a separate binary and a separate image, because it needs
+# ffmpeg and the prober deliberately does not.
+docker-mosaic:
+	docker build -f Dockerfile.mosaic -t streampulse:mosaic .
 
 # The demo stack: prober + Prometheus + Grafana against public test streams.
 compose-up:

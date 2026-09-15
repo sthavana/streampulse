@@ -19,3 +19,19 @@ services:
     build:
       context: ..
       dockerfile: Dockerfile.full
+
+  # The multiviewer, a client of the prober rather than part of it. It reads
+  # /api/state for the target list and their health, and runs one ffmpeg per
+  # target for the pictures -- which is exactly why it is a separate container:
+  # a wall decoding every channel continuously must not be able to starve the
+  # process that does the alerting.
+  mosaic:
+    build:
+      context: ..
+      dockerfile: Dockerfile.mosaic
+    command: ["-prober", "http://prober:9090", "-addr", ":9091"]
+    ports:
+      - "9091:9091"
+    depends_on:
+      - prober
+    restart: unless-stopped

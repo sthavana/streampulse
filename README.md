@@ -145,6 +145,7 @@ web UI above answers the question those cannot: what is happening *right now*.
 [alerting](#alerting-incidents-not-findings) ·
 [maintenance windows](#maintenance-windows) ·
 [web UI](#web-ui) ·
+[multiviewer](#multiviewer) ·
 [metrics](#metrics-exposed-metrics) ·
 [deployment](#deployment) ·
 [production guide](docs/DEPLOYMENT.md)
@@ -1094,6 +1095,69 @@ air-gapped host. It lays out down to phone width, where the tables scroll
 sideways in their own box rather than dragging the page with them. It is **unauthenticated and read-only**: bind `metrics_addr`
 somewhere private, as you would for `/metrics` itself.
 
+## Multiviewer
+
+A tile wall: a picture per target beside the health the prober already knows.
+
+![The multiviewer](docs/screenshot-multiviewer.png)
+
+```
+make docker-mosaic
+docker run -p 9091:9091 streampulse:mosaic -prober http://localhost:9090
+```
+
+Then open <http://localhost:9091/mosaic>. In the screenshot above, two of
+Unified's tiles have just gone critical with the reason on the tile, one target
+is deliberately pointed at a dead origin and shows **no signal**, and the rest
+are green — all of it read from one running prober.
+
+**It is a separate binary, and that is the point.** A multiviewer decodes every
+channel continuously; a prober samples one segment per poll and has to stay
+light enough to be trusted when everything else is on fire. Keeping them in one
+process would let an ffmpeg storm starve the thing that pages you, and would
+force ffmpeg into the prober's image — which is 10MB of scratch container
+precisely because it does not need one.
+
+**It has no configuration.** Point it at a prober and it reads `/api/state`:
+the target list, where each stream lives, which are up, and what is firing.
+That is also the whole integration — no plugin, no notifier hook, no second
+copy of what "critical" means. When someone edits the prober's config, the
+prober re-reads it while running and the wall follows within a poll.
+
+| Flag | Default | |
+|---|---|---|
+| `-prober` | `http://localhost:9090` | the prober to follow |
+| `-addr` | `:9091` | where to serve the wall |
+| `-fps` | `1` | thumbnail rate; `1/2` halves the cost |
+| `-width` | `320` | thumbnail width, aspect preserved |
+| `-quality` | `7` | JPEG quality, 2 best to 31 worst |
+
+Each tile is motion-JPEG in a plain `<img>`: no media decoding in the browser,
+no JavaScript build step, flat cost however many tiles are on the wall. Status
+arrives separately over server-sent events, so a tile's border and numbers
+update even while its picture is stuck.
+
+Three things the wall knows that the operator page does not:
+
+- **A tile can be black while every check passes.** `frame_age` is the wall's
+  own liveness signal — six seconds without a thumbnail is "no signal",
+  regardless of what the prober thinks.
+- **A target the prober cannot reach is red immediately**, without waiting for
+  `for_seconds` to open an incident. A black tile with a green border is the
+  single worst thing a multiviewer can show.
+- **When the prober itself is unreachable**, tiles keep their last known health
+  and the wall says so at the top rather than quietly going green.
+
+**What it costs.** One ffmpeg per target, running continuously, pulling the
+full stream. That is a different resource profile from the prober's, and the
+reason the two are deployed apart. At 20 targets, budget for 20 continuous
+stream pulls; `-fps 1/2` and a smaller `-width` are the dials.
+
+**A known limit worth stating.** Each tile is a long-lived HTTP response, and
+browsers allow about six connections per origin over HTTP/1.1 — so a wall much
+past six tiles wants HTTP/2, which means putting it behind TLS. The
+`deploy/` stack does not, because it is a demo.
+
 ## Metrics exposed (`/metrics`)
 
 `streampulse_probe_up`, `streampulse_variant_up`, `streampulse_manifest_fetch_seconds`,
@@ -1223,6 +1287,22 @@ told there is nothing to say.
          | alert.Notifier|
          |  JSON / Slack |
          +--------------+
+
+The multiviewer hangs off the side of that, as a client rather than a part:
+
+                +-------------------+        +--------------------+
+                |      prober       |        |      mosaic        |
+                |  /api/state       |<-------|  (cmd/mosaic)      |
+                +-------------------+  poll  +----------+---------+
+                                                        | one per target
+                                              +---------v---------+
+                                              |  ffmpeg -> JPEG   |
+                                              |  1 fps thumbnails |
+                                              +-------------------+
+
+It reads the prober's state over HTTP and owns no opinion about health. The
+arrow only points one way: the prober does not know the wall exists, and stops
+working in no respect if it is not running.
 ```
 
 Packages: `hls` and `dash` (manifest parsers), `probe` (prober + checks),
@@ -1256,8 +1336,9 @@ Packages: `hls` and `dash` (manifest parsers), `probe` (prober + checks),
 
 ## Status
 
-MVP. Media inspection is optional and off by default; everything else is
-standard library only. The HLS path is implemented and tested end to end
+MVP. Two binaries: `cmd/prober` does the checking and `cmd/mosaic` is the
+optional [multiviewer](#multiviewer). Media inspection is optional and off by
+default; everything else is standard library only. The HLS path is implemented and tested end to end
 (`make test`). DASH is
 probed for reachability, segment availability, live-edge progression, the DRM
 its manifest declares, the promises the MPD makes about its own timeline,

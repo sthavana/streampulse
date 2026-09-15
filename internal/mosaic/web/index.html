@@ -1,0 +1,133 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>StreamPulse Multiviewer</title>
+<style>
+  :root { --gap: 8px; --crit:#e5484d; --warn:#f5a623; --ok:#30a46c; --dead:#5a5a5a; --info:#3b82f6; }
+  * { box-sizing: border-box; }
+  body { margin:0; background:#0b0b0d; color:#e6e6e6; font:13px/1.35 ui-monospace,Menlo,Consolas,monospace; }
+  header { padding:8px 12px; display:flex; align-items:center; gap:12px; border-bottom:1px solid #222; }
+  header h1 { font-size:14px; margin:0; letter-spacing:.5px; font-weight:600; }
+  header .legend { display:flex; gap:14px; margin-left:auto; font-size:11px; color:#aaa; }
+  header .legend i { display:inline-block; width:9px; height:9px; border-radius:2px; margin-right:5px; vertical-align:middle; }
+  #wall { display:grid; gap:var(--gap); padding:var(--gap);
+          grid-template-columns:repeat(auto-fill,minmax(300px,1fr)); }
+  .tile { position:relative; background:#000; border:3px solid var(--dead);
+          border-radius:4px; overflow:hidden; aspect-ratio:16/9; transition:border-color .2s; }
+  .tile img { width:100%; height:100%; object-fit:cover; display:block; opacity:.95; }
+  .tile.dead img { opacity:.25; filter:grayscale(1); }
+  .tile.ok   { border-color:var(--ok); }
+  .tile.info { border-color:var(--info); }
+  .tile.warning { border-color:var(--warn); }
+  .tile.critical { border-color:var(--crit); animation:pulse 1s ease-in-out infinite; }
+  @keyframes pulse { 50% { border-color:#7a1418; } }
+  .bar { position:absolute; left:0; right:0; bottom:0; padding:4px 6px;
+         background:linear-gradient(transparent,rgba(0,0,0,.85)); display:flex; justify-content:space-between; gap:8px; }
+  /* The name is elided rather than wrapped: a wrapped name grows the bar
+     upwards over the picture and collides with the numbers beside it. */
+  .bar .name { font-weight:600; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; min-width:0; }
+  .bar .meta { color:#cfcfcf; text-align:right; white-space:nowrap; flex:none; }
+  .top { position:absolute; top:6px; left:6px; right:6px; display:flex; justify-content:space-between; gap:6px; }
+  .sev { font-size:10px; padding:1px 6px; border-radius:3px; background:rgba(0,0,0,.6); text-transform:uppercase; letter-spacing:.5px; }
+  .sev.critical{color:#fff;background:var(--crit);} .sev.warning{color:#111;background:var(--warn);}
+  .sev.ok{color:#fff;background:var(--ok);} .sev.info{color:#fff;background:var(--info);} .sev.dead{color:#ddd;background:var(--dead);}
+  /* One line, clipped. A failure message is a sentence and the tile is 300px
+     wide; the whole of it is on the operator page, and what belongs here is
+     only enough to know which fault this is. */
+  /* Carries its own backing: over a bright test card, white text on nothing
+     is unreadable, and the tile that most needs reading is the broken one. */
+  .summary { color:#ffd9d9; font-size:11px; overflow:hidden; text-overflow:ellipsis;
+             white-space:nowrap; min-width:0; text-align:right;
+             background:rgba(0,0,0,.72); border-radius:3px; padding:1px 6px; }
+  .summary:empty { display:none; }
+  /* Not knowing is not the same as knowing something is wrong, so it is said
+     once at the top rather than painted onto every tile. */
+  .stale { color:#111; background:var(--warn); padding:2px 8px; border-radius:3px; font-size:11px; }
+  #wall.stale-wall .tile { opacity:.72; }
+</style>
+</head>
+<body>
+<header>
+  <h1>STREAMPULSE ▸ MULTIVIEWER</h1>
+  <span id="stale" class="stale" hidden>prober unreachable — showing last known health</span>
+  <div class="legend">
+    <span><i style="background:var(--ok)"></i>OK</span>
+    <span><i style="background:var(--warn)"></i>Warning</span>
+    <span><i style="background:var(--crit)"></i>Critical</span>
+    <span><i style="background:var(--dead)"></i>No signal</span>
+  </div>
+</header>
+<div id="wall"></div>
+<script>
+const wall = document.getElementById('wall');
+const staleBanner = document.getElementById('stale');
+let tiles = {};
+
+function fmt(n, unit, dp=0){ return (n||n===0) ? n.toFixed(dp)+unit : ''; }
+
+// The wall is rebuilt whenever the prober's target list changes -- it re-reads
+// its config while running, so targets appear and disappear without a restart
+// and the wall has to follow. Tiles that survive are left alone, because
+// replacing an <img> restarts its MJPEG stream and blinks the picture.
+function reconcile(rows){
+  const want = rows.map(r => r.target_id);
+  const have = Object.keys(tiles);
+  if (want.length === have.length && want.every(id => tiles[id])) return;
+
+  for (const id of have) if (!want.includes(id)) { tiles[id].remove(); delete tiles[id]; }
+  for (const r of rows){
+    if (tiles[r.target_id]) { wall.appendChild(tiles[r.target_id]); continue; }
+    const el = document.createElement('div');
+    el.className = 'tile dead';
+    el.innerHTML =
+      '<img alt="" src="tile/'+encodeURIComponent(r.target_id)+'">' +
+      '<div class="top"><span class="sev dead">no signal</span><span class="summary"></span></div>' +
+      '<div class="bar"><span class="name"></span><span class="meta"></span></div>';
+    el.querySelector('img').alt = r.name;
+    el.querySelector('.name').textContent = r.name;
+    wall.appendChild(el);
+    tiles[r.target_id] = el;
+  }
+}
+
+function listen(){
+  const es = new EventSource('events');
+  es.onmessage = (e) => {
+    const rows = JSON.parse(e.data);
+    reconcile(rows);
+    staleBanner.hidden = !(rows.length && rows[0].stale);
+    wall.classList.toggle('stale-wall', !staleBanner.hidden);
+
+    for (const r of rows){
+      const el = tiles[r.target_id];
+      if (!el) continue;
+      // Six seconds of a one-per-second thumbnail is a stream that has
+      // stopped, not one that stuttered. It is the wall's own liveness
+      // signal: true even when the prober says the target is fine.
+      const dead = r.frame_age_s < 0 || r.frame_age_s > 6;
+      const sev = dead ? 'dead' : r.severity;
+      el.className = 'tile ' + sev + (dead ? ' dead' : '');
+      const badge = el.querySelector('.sev');
+      badge.className = 'sev ' + sev;
+      badge.textContent = dead ? 'no signal' : r.severity;
+      el.querySelector('.name').textContent = r.name;
+      const summary = r.summary || (r.up === false ? 'unreachable' : '');
+      const sumEl = el.querySelector('.summary');
+      sumEl.textContent = summary;
+      el.title = summary ? r.name + ' — ' + summary : r.name;
+
+      const meta = [];
+      if (r.edge_age_s) meta.push('age ' + fmt(r.edge_age_s,'s',0));
+      if (r.ttfb_s)     meta.push('ttfb ' + fmt(r.ttfb_s*1000,'ms',0));
+      if (r.window_s)   meta.push('win ' + fmt(r.window_s/60,'m',1));
+      el.querySelector('.meta').textContent = meta.join('  ');
+    }
+  };
+  es.onerror = () => { /* EventSource auto-reconnects */ };
+}
+listen();
+</script>
+</body>
+</html>
