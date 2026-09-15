@@ -55,7 +55,7 @@ func (s *stateServer) url() string { return s.srv.URL }
 func (s *stateServer) close()      { s.srv.Close() }
 
 // poll runs one fetch-and-apply cycle, which is what each tick of Run does.
-func poll(t *testing.T, src *Source) map[string]string {
+func poll(t *testing.T, src *Source) map[string]Stream {
 	t.Helper()
 	state, err := src.fetch(context.Background())
 	if err != nil {
@@ -84,9 +84,9 @@ func TestTargetsAndURLsComeFromTheProber(t *testing.T) {
 	store := New()
 	src := &Source{ProberURL: srv.url(), Store: store}
 
-	urls := poll(t, src)
-	if urls["news"] != "https://cdn/news.m3u8" || urls["sport"] != "https://cdn/sport.mpd" {
-		t.Fatalf("urls = %v", urls)
+	streams := poll(t, src)
+	if streams["news"].URL != "https://cdn/news.m3u8" || streams["sport"].URL != "https://cdn/sport.mpd" {
+		t.Fatalf("streams = %v", streams)
 	}
 	got := store.Targets()
 	if len(got) != 2 || got[0].ID != "news" || got[1].ID != "sport" {
@@ -180,9 +180,9 @@ func TestTheWallFollowsTheProbersTargetList(t *testing.T) {
 	srv.set(`{"targets":[{"name":"sport","url":"https://cdn/sport.mpd","up":true,"metrics":{},"streams":[]},
 	                     {"name":"kids","url":"https://cdn/kids.m3u8","up":true,"metrics":{},"streams":[]}],
 	          "incidents":[]}`)
-	urls := poll(t, src)
+	streams := poll(t, src)
 
-	if _, gone := urls["news"]; gone {
+	if _, gone := streams["news"]; gone {
 		t.Error("a removed target is still being grabbed")
 	}
 	got := store.Targets()
@@ -294,7 +294,7 @@ func TestOnTargetsFiresOnlyOnChange(t *testing.T) {
 	calls := 0
 	src := &Source{
 		ProberURL: srv.url(), Store: New(), Every: 5 * time.Millisecond,
-		OnTargets: func(map[string]string) { mu.Lock(); calls++; mu.Unlock() },
+		OnTargets: func(map[string]Stream) { mu.Lock(); calls++; mu.Unlock() },
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	go src.Run(ctx)
@@ -355,4 +355,55 @@ func TestHealthOfAVanishedTargetDoesNotLinger(t *testing.T) {
 			t.Errorf("a target the prober no longer reports kept its health: %+v", st)
 		}
 	}
+}
+
+// Whether a target is live is the prober's answer, and the wall needs it to
+// decide how to read the stream.
+func TestLivenessReachesTheGrabber(t *testing.T) {
+	srv := newStateServer(`{
+	  "targets":[
+	    {"name":"vod","url":"https://cdn/vod.m3u8","up":true,"live":false,"metrics":{},"streams":[]},
+	    {"name":"live","url":"https://cdn/live.m3u8","up":true,"live":true,"metrics":{},"streams":[]},
+	    {"name":"unknown","url":"https://cdn/x.m3u8","up":true,"metrics":{},"streams":[]}
+	  ],"incidents":[]}`)
+	defer srv.close()
+
+	got := poll(t, &Source{ProberURL: srv.url(), Store: New()})
+	if got["vod"].Live {
+		t.Error("a VOD target was passed to the grabber as live")
+	}
+	if !got["live"].Live {
+		t.Error("a live target was passed to the grabber as VOD")
+	}
+	// Pacing a live stream is harmless; not pacing a VOD one is the bug.
+	if !got["unknown"].Live {
+		t.Error("a target with no verdict was treated as VOD, the riskier guess")
+	}
+}
+
+// A target that flips between live and VOD -- a live event that ends -- must
+// restart its grabber, because the two are read with different ffmpeg flags.
+func TestALivenessChangeRestartsTheGrabber(t *testing.T) {
+	srv := newStateServer(`{"targets":[{"name":"ev","url":"u","up":true,"live":true,"metrics":{},"streams":[]}],
+	                        "incidents":[]}`)
+	defer srv.close()
+
+	var mu sync.Mutex
+	var seen []Stream
+	src := &Source{
+		ProberURL: srv.url(), Store: New(), Every: 5 * time.Millisecond,
+		OnTargets: func(s map[string]Stream) { mu.Lock(); seen = append(seen, s["ev"]); mu.Unlock() },
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go src.Run(ctx)
+	waitFor(t, func() bool { mu.Lock(); defer mu.Unlock(); return len(seen) == 1 }, "no initial target set")
+
+	srv.set(`{"targets":[{"name":"ev","url":"u","up":true,"live":false,"metrics":{},"streams":[]}],
+	          "incidents":[]}`)
+	waitFor(t, func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		return len(seen) == 2 && !seen[1].Live
+	}, "the event ending did not reach the grabber")
 }

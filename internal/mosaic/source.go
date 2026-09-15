@@ -24,9 +24,9 @@ type Source struct {
 	Every     time.Duration
 	Store     *Store
 	Client    *http.Client
-	// OnTargets is called with name -> stream URL whenever the set changes,
-	// for the caller to start and stop grabbers. Never called concurrently.
-	OnTargets func(map[string]string)
+	// OnTargets is called with name -> stream whenever the set changes, for
+	// the caller to start and stop grabbers. Never called concurrently.
+	OnTargets func(map[string]Stream)
 	Logf      func(format string, args ...any)
 }
 
@@ -55,7 +55,7 @@ func (s *Source) client() *http.Client {
 func (s *Source) Run(ctx context.Context) {
 	t := time.NewTicker(s.every())
 	defer t.Stop()
-	var last map[string]string
+	var last map[string]Stream
 	failing := false
 
 	poll := func() {
@@ -78,10 +78,10 @@ func (s *Source) Run(ctx context.Context) {
 			s.log("mosaic: prober reachable again")
 			failing = false
 		}
-		urls := state.apply(s.Store)
-		if s.OnTargets != nil && !sameURLs(last, urls) {
-			s.OnTargets(urls)
-			last = urls
+		streams := state.apply(s.Store)
+		if s.OnTargets != nil && !sameStreams(last, streams) {
+			s.OnTargets(streams)
+			last = streams
 		}
 	}
 
@@ -129,9 +129,13 @@ func (s *Source) fetch(ctx context.Context) (*proberState, error) {
 // the prober can add to its API without this failing to parse.
 type proberState struct {
 	Targets []struct {
-		Name    string             `json:"name"`
-		URL     string             `json:"url"`
-		Up      *bool              `json:"up"`
+		Name string `json:"name"`
+		URL  string `json:"url"`
+		Up   *bool  `json:"up"`
+		// Live is what tells the wall whether to pace the input. A VOD tile
+		// read as fast as it downloads fast-forwards through the clip and
+		// then restarts; see Grabber.args.
+		Live    *bool              `json:"live"`
 		Metrics map[string]float64 `json:"metrics"`
 		Streams []struct {
 			Metrics map[string]float64 `json:"metrics"`
@@ -144,13 +148,15 @@ type proberState struct {
 	} `json:"incidents"`
 }
 
-// apply pushes the state into the store and returns the target URLs to grab.
-func (s *proberState) apply(store *Store) map[string]string {
+// apply pushes the state into the store and returns the streams to grab.
+func (s *proberState) apply(store *Store) map[string]Stream {
 	infos := make([]TargetInfo, 0, len(s.Targets))
-	urls := make(map[string]string, len(s.Targets))
+	streams := make(map[string]Stream, len(s.Targets))
 	for _, t := range s.Targets {
 		infos = append(infos, TargetInfo{ID: t.Name, Name: t.Name})
-		urls[t.Name] = t.URL
+		// Unknown liveness is treated as live: pacing a live stream is
+		// harmless, while not pacing a VOD one is the bug this fixes.
+		streams[t.Name] = Stream{URL: t.URL, Live: t.Live == nil || *t.Live}
 	}
 	store.Sync(infos)
 
@@ -203,10 +209,10 @@ func (s *proberState) apply(store *Store) map[string]string {
 		health[t.Name] = h
 	}
 	store.SetHealth(health)
-	return urls
+	return streams
 }
 
-func sameURLs(a, b map[string]string) bool {
+func sameStreams(a, b map[string]Stream) bool {
 	if len(a) != len(b) {
 		return false
 	}

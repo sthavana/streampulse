@@ -51,9 +51,19 @@ func (r *fakeRunner) Run(ctx context.Context) {
 
 func newTestPool() (*Pool, *runLog) {
 	log := newRunLog()
-	return NewPool(func(id, url string) Runner {
-		return &fakeRunner{id: id, url: url, log: log}
+	return NewPool(func(id string, s Stream) Runner {
+		return &fakeRunner{id: id, url: s.URL, log: log}
 	}), log
+}
+
+// live builds the map Sync takes, for the common case where only the URLs
+// matter to the test.
+func live(pairs map[string]string) map[string]Stream {
+	out := make(map[string]Stream, len(pairs))
+	for id, url := range pairs {
+		out[id] = Stream{URL: url, Live: true}
+	}
+	return out
 }
 
 func waitLive(t *testing.T, log *runLog, want int) {
@@ -74,7 +84,7 @@ func TestPoolStartsOneGrabberPerTarget(t *testing.T) {
 	defer cancel()
 	defer pool.Stop()
 
-	started, stopped := pool.Sync(ctx, map[string]string{"a": "u1", "b": "u2"})
+	started, stopped := pool.Sync(ctx, live(map[string]string{"a": "u1", "b": "u2"}))
 	if len(started) != 2 || len(stopped) != 0 {
 		t.Fatalf("started %v stopped %v", started, stopped)
 	}
@@ -92,7 +102,7 @@ func TestPoolLeavesUnchangedTargetsAlone(t *testing.T) {
 	defer cancel()
 	defer pool.Stop()
 
-	want := map[string]string{"a": "u1", "b": "u2"}
+	want := live(map[string]string{"a": "u1", "b": "u2"})
 	pool.Sync(ctx, want)
 	waitLive(t, log, 2)
 
@@ -114,10 +124,10 @@ func TestPoolStopsGrabbersForRemovedTargets(t *testing.T) {
 	defer cancel()
 	defer pool.Stop()
 
-	pool.Sync(ctx, map[string]string{"a": "u1", "b": "u2"})
+	pool.Sync(ctx, live(map[string]string{"a": "u1", "b": "u2"}))
 	waitLive(t, log, 2)
 
-	_, stopped := pool.Sync(ctx, map[string]string{"a": "u1"})
+	_, stopped := pool.Sync(ctx, live(map[string]string{"a": "u1"}))
 	if len(stopped) != 1 || stopped[0] != "b" {
 		t.Fatalf("stopped = %v, want [b]", stopped)
 	}
@@ -135,10 +145,10 @@ func TestPoolRestartsAGrabberWhenTheURLChanges(t *testing.T) {
 	defer cancel()
 	defer pool.Stop()
 
-	pool.Sync(ctx, map[string]string{"a": "u1"})
+	pool.Sync(ctx, live(map[string]string{"a": "u1"}))
 	waitLive(t, log, 1)
 
-	started, stopped := pool.Sync(ctx, map[string]string{"a": "u2"})
+	started, stopped := pool.Sync(ctx, live(map[string]string{"a": "u2"}))
 	if len(started) != 1 || len(stopped) != 1 {
 		t.Fatalf("started %v stopped %v, want the grabber replaced", started, stopped)
 	}
@@ -164,7 +174,7 @@ func TestPoolStopWaitsForGrabbersToExit(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	pool.Sync(ctx, map[string]string{"a": "u1", "b": "u2", "c": "u3"})
+	pool.Sync(ctx, live(map[string]string{"a": "u1", "b": "u2", "c": "u3"}))
 	waitLive(t, log, 3)
 
 	pool.Stop()
@@ -183,9 +193,38 @@ func TestCancellingTheContextStopsGrabbers(t *testing.T) {
 	pool, log := newTestPool()
 	ctx, cancel := context.WithCancel(context.Background())
 
-	pool.Sync(ctx, map[string]string{"a": "u1"})
+	pool.Sync(ctx, live(map[string]string{"a": "u1"}))
 	waitLive(t, log, 1)
 
 	cancel()
 	waitLive(t, log, 0)
+}
+
+// A live event that ends becomes VOD, and the two are read with different
+// ffmpeg flags, so the grabber has to be replaced even though the URL has not
+// changed.
+func TestPoolRestartsWhenLivenessChanges(t *testing.T) {
+	pool, log := newTestPool()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	defer pool.Stop()
+
+	pool.Sync(ctx, map[string]Stream{"a": {URL: "u1", Live: true}})
+	waitLive(t, log, 1)
+
+	started, stopped := pool.Sync(ctx, map[string]Stream{"a": {URL: "u1", Live: false}})
+	if len(started) != 1 || len(stopped) != 1 {
+		t.Fatalf("started %v stopped %v, want the grabber replaced", started, stopped)
+	}
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		log.mu.Lock()
+		n := len(log.started)
+		log.mu.Unlock()
+		if n == 2 {
+			return
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+	t.Error("the grabber was not replaced when the target stopped being live")
 }

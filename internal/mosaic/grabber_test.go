@@ -117,3 +117,38 @@ func TestGrabberArgumentsHonourOverrides(t *testing.T) {
 		}
 	}
 }
+
+// A finite input read as fast as it downloads fast-forwards through the clip
+// and then restarts from the beginning. Apple's ten-minute sample did exactly
+// that on the demo wall: 600 frames in seventy seconds, eight and a half times
+// speed, then a jump back, every minute, re-downloading the clip each time.
+func TestVODInputIsPacedAndLooped(t *testing.T) {
+	args := strings.Join((&Grabber{URL: "u", Live: false}).args(), " ")
+
+	if !strings.Contains(args, "-re") {
+		t.Errorf("a VOD input is not paced: %s", args)
+	}
+	if !strings.Contains(args, "-stream_loop -1") {
+		t.Errorf("a VOD input does not loop, so the tile dies at the end: %s", args)
+	}
+	// Order matters to ffmpeg: both are input options and mean nothing after -i.
+	if strings.Index(args, "-re") > strings.Index(args, "-i ") {
+		t.Errorf("-re is after -i, where ffmpeg ignores it: %s", args)
+	}
+	if strings.Index(args, "-stream_loop") > strings.Index(args, "-i ") {
+		t.Errorf("-stream_loop is after -i, where ffmpeg ignores it: %s", args)
+	}
+}
+
+// Live input is already paced by segment availability. Pacing it again is at
+// best redundant and at worst a slow drift behind the live edge.
+func TestLiveInputIsNotPaced(t *testing.T) {
+	args := strings.Join((&Grabber{URL: "u", Live: true}).args(), " ")
+
+	if strings.Contains(args, "-re") {
+		t.Errorf("a live input is being paced: %s", args)
+	}
+	if strings.Contains(args, "-stream_loop") {
+		t.Errorf("a live input is being looped: %s", args)
+	}
+}

@@ -3,9 +3,14 @@
 #
 #   docker compose up
 #
+#   prober UI       http://localhost:9090
 #   prober metrics  http://localhost:9090/metrics
 #   prometheus      http://localhost:9091
 #   grafana         http://localhost:3000  (anonymous, no login)
+#
+# With the full overlay (make compose-up-full) the multiviewer joins them:
+#
+#   multiviewer     http://localhost:9092/mosaic
 #
 # Edit config.json to point at your own streams; the prober rereads it on
 # restart, so `docker compose restart prober` picks up changes.

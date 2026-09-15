@@ -43,11 +43,12 @@ func main() {
 
 	// One grabber per target, built here so the package never needs to know
 	// what the flags are called.
-	pool := mosaic.NewPool(func(id, url string) mosaic.Runner {
+	pool := mosaic.NewPool(func(id string, stream mosaic.Stream) mosaic.Runner {
 		return &mosaic.Grabber{
 			FFmpegPath: *ffmpegPath,
 			TargetID:   id,
-			URL:        url,
+			URL:        stream.URL,
+			Live:       stream.Live,
 			FPS:        *fps,
 			Width:      *width,
 			Quality:    *quality,
@@ -64,8 +65,8 @@ func main() {
 		Every:     *poll,
 		Store:     store,
 		Logf:      log.Printf,
-		OnTargets: func(urls map[string]string) {
-			started, stopped := pool.Sync(ctx, urls)
+		OnTargets: func(streams map[string]mosaic.Stream) {
+			started, stopped := pool.Sync(ctx, streams)
 			if len(started) > 0 {
 				log.Printf("mosaic: grabbing %v", started)
 			}

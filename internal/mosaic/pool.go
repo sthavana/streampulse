@@ -6,6 +6,14 @@ import (
 	"sync"
 )
 
+// Stream is everything the wall needs in order to grab one target: where it
+// is, and whether it is live. Both come from the prober, and both matter --
+// see Grabber.args for what being live changes about the ffmpeg command.
+type Stream struct {
+	URL  string
+	Live bool
+}
+
 // Pool keeps one Grabber running per target and follows the prober's target
 // list as it changes.
 //
@@ -17,7 +25,7 @@ import (
 type Pool struct {
 	// New builds a grabber for one target. Injected so tests can run a pool
 	// without ffmpeg.
-	New func(id, url string) Runner
+	New func(id string, s Stream) Runner
 
 	mu      sync.Mutex
 	running map[string]*entry
@@ -30,24 +38,24 @@ type Runner interface {
 }
 
 type entry struct {
-	url    string
+	stream Stream
 	cancel context.CancelFunc
 	done   chan struct{}
 }
 
-func NewPool(new func(id, url string) Runner) *Pool {
+func NewPool(new func(id string, s Stream) Runner) *Pool {
 	return &Pool{New: new, running: map[string]*entry{}}
 }
 
-// Sync makes the running grabbers match want (target id -> stream URL) and
-// reports what it started and stopped.
-func (p *Pool) Sync(ctx context.Context, want map[string]string) (started, stopped []string) {
+// Sync makes the running grabbers match want (target id -> stream) and reports
+// what it started and stopped.
+func (p *Pool) Sync(ctx context.Context, want map[string]Stream) (started, stopped []string) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
 	for id, e := range p.running {
-		url, keep := want[id]
-		if keep && url == e.url {
+		stream, keep := want[id]
+		if keep && stream == e.stream {
 			continue
 		}
 		// Gone, or pointed somewhere else. Either way this grabber is wrong.
@@ -55,14 +63,14 @@ func (p *Pool) Sync(ctx context.Context, want map[string]string) (started, stopp
 		delete(p.running, id)
 		stopped = append(stopped, id)
 	}
-	for id, url := range want {
+	for id, stream := range want {
 		if _, ok := p.running[id]; ok {
 			continue
 		}
 		gctx, cancel := context.WithCancel(ctx)
-		e := &entry{url: url, cancel: cancel, done: make(chan struct{})}
+		e := &entry{stream: stream, cancel: cancel, done: make(chan struct{})}
 		p.running[id] = e
-		runner := p.New(id, url)
+		runner := p.New(id, stream)
 		go func() {
 			defer close(e.done)
 			runner.Run(gctx)

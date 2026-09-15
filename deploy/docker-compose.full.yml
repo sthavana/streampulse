@@ -30,8 +30,9 @@ services:
       context: ..
       dockerfile: Dockerfile.mosaic
     command: ["-prober", "http://prober:9090", "-addr", ":9091"]
+    # 9092 on the host: Prometheus already has 9091 in the base stack.
     ports:
-      - "9091:9091"
+      - "9092:9091"
     depends_on:
       - prober
     restart: unless-stopped
