@@ -107,10 +107,15 @@ function listen(){
       // stopped, not one that stuttered. It is the wall's own liveness
       // signal: true even when the prober says the target is fine.
       const dead = r.frame_age_s < 0 || r.frame_age_s > 6;
-      const sev = dead ? 'dead' : r.severity;
-      el.className = 'tile ' + sev + (dead ? ' dead' : '');
+      // Losing the picture and being unhealthy are two facts, and a tile that
+      // is both used to show only the first: grey, when the prober had it
+      // firing critical. Severity keeps the border; grey is what is left when
+      // there is no fault to report and no picture either, which is the wall
+      // knowing something the prober does not.
+      const border = (dead && r.severity === 'ok') ? 'dead' : r.severity;
+      el.className = 'tile ' + border + (dead ? ' dead' : '');
       const badge = el.querySelector('.sev');
-      badge.className = 'sev ' + sev;
+      badge.className = 'sev ' + border;
       badge.textContent = dead ? 'no signal' : r.severity;
       el.querySelector('.name').textContent = r.name;
       const summary = r.summary || (r.up === false ? 'unreachable' : '');
