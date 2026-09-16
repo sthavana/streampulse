@@ -41,6 +41,21 @@
       "segment_sample": 1,
       "inspect": true,
       "thumbnails": true
+    },
+    {
+      "name": "apple-declared-live",
+      "url": "https://devstreaming-cdn.apple.com/videos/streaming/examples/img_bipbop_adv_example_fmp4/master.m3u8",
+      "type": "hls",
+      "interval_seconds": 20,
+      "max_variants": 1,
+      "max_renditions": 1,
+      "segment_sample": 1,
+      "expect_live": true
+    },
+    {
+      "name": "origin-unreachable",
+      "url": "http://127.0.0.1:1/live.m3u8",
+      "interval_seconds": 15
     }
   ],
   "inspection": {

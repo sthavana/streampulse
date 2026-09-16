@@ -75,6 +75,20 @@ make compose-up-full     # the same stack, plus pictures and the tile wall
 Everything else stays where it was. The wall is on 9092 here because
 Prometheus has 9091 in this stack; standalone it defaults to 9091.
 
+**Two of the five demo targets are broken on purpose**, because a monitoring
+tool showing nothing but green tells you nothing about itself:
+
+- `origin-unreachable` points at a dead port. No manifest, no pictures: a grey
+  **no signal** tile and a critical incident.
+- `apple-declared-live` is Apple's VOD clip declared as live, so
+  `unexpected_endlist` fires while the video keeps decoding perfectly. It is
+  the more interesting of the two — a flawless picture inside a red border,
+  which is exactly the fault a wall of pictures alone would never show you.
+
+Delete them from `deploy/config.json` for an all-green stack; the prober
+re-reads it while running, so the tiles and their incidents disappear within a
+few seconds without a restart.
+
 Both run off the same `deploy/config.json`, which asks for ffprobe either way.
 On the small image it is simply absent, the prober says so at startup and
 carries on:
