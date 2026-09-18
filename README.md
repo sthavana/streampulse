@@ -173,6 +173,9 @@ web UI above answers the question those cannot: what is happening *right now*.
 [deployment](#deployment) ·
 [production guide](docs/DEPLOYMENT.md)
 
+**Background**
+[how a stream gets to a viewer, and where it breaks](docs/STREAMING.md)
+
 **About**
 [architecture](#architecture) ·
 [design choices](#deliberate-design-choices) ·
@@ -186,6 +189,12 @@ web UI above answers the question those cannot: what is happening *right now*.
 
 Variants and `EXT-X-MEDIA` renditions alike -- the playlist checks below run
 against alternative audio and subtitle tracks as well as the video ladder.
+
+If the vocabulary in these tables is unfamiliar, [**how a stream gets to a
+viewer, and where it breaks**](docs/STREAMING.md) is the background: ABR
+ladders, packaging, HLS and DASH in detail, low latency, and what origins and
+CDNs each contribute to a fault. Every section ends with the checks that catch
+what it describes.
 
 
 | Check | Severity | What it catches |
