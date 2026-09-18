@@ -176,6 +176,7 @@ web UI above answers the question those cannot: what is happening *right now*.
 **About**
 [architecture](#architecture) ·
 [design choices](#deliberate-design-choices) ·
+[what a day of running found](#what-running-it-for-a-day-found) ·
 [roadmap](#roadmap) ·
 [status](#status)
 
@@ -1344,8 +1345,64 @@ Packages: `hls` and `dash` (manifest parsers), `probe` (prober + checks),
   the parser → `grafov/m3u8`; metrics → `prometheus/client_golang`;
   config → YAML; notifiers → add PagerDuty/webhook/DB sinks. None of these
   change the interfaces the prober uses.
-- **State lives in the prober**, keyed by playlist URL, so cross-poll checks
-  (freeze, PDT progression) work without external storage for the MVP.
+- **State lives in the prober**, keyed by target and playlist, so cross-poll
+  checks (freeze, PDT progression) work without external storage for the MVP.
+  It was keyed by playlist alone until a soak found what that does when two
+  targets watch one stream -- see [below](#what-running-it-for-a-day-found).
+
+## What running it for a day found
+
+A monitoring tool's own test suite is the least interesting evidence about it,
+so this one was left running for 28 hours against live streams -- Unified's
+DASH and HLS, Apple's fMP4 VOD, and one target pointed at a dead port as a
+control -- sampling memory, thread count, metric cardinality and open
+incidents every five minutes.
+
+The boring numbers were boring, which is the point of measuring them:
+
+| | start | 28h |
+|---|---|---|
+| Memory | 14.1 MiB | 18-19 MiB, flat from hour 6 |
+| Threads | 12 | 16, flat from hour 8 |
+| Metric series | 106 | 159, flat from hour 7 |
+
+And seven false positives.
+
+Seven `playlist_rollback` findings, each exactly 1152 ticks -- one segment --
+every one of them on the target polling every 120s and never on the one
+polling the **same URL** every 10s, and the cache header said HIT on five.
+Nothing was stale. Cross-poll state was keyed by URL:
+
+```go
+func edgeKey(t config.Target, variant string) string {
+    return t.URL + "#" + variant   // two targets, one stream, one state entry
+}
+```
+
+Two targets on one stream shared an entry. The fast one advanced the live
+edge; the slow one then measured its own perfectly good manifest against the
+fast one's newer reading and called the difference a rollback.
+
+The half that did *not* show up in those 28 hours is the one worth having
+found. A frozen edge on one target is reported as a rollback and never as a
+stall, because the other target keeps moving the timestamp on: a fault
+reported as the wrong thing, and then not reported at all. The test written
+for it fails five times over against the old key.
+
+There were about 9,800 lines of tests at that point, including one named
+`TestEdgeStateIsPerTargetAndRepresentation`. It used two targets on
+*different* URLs, and was perfectly happy.
+
+Two more arrived an hour after the release that added the multiviewer, the
+first time the demo stack was actually run end to end: a compose file that
+could not start because two services claimed port 9091, and a VOD tile playing
+at eight times speed because ffmpeg reads a finite input as fast as it can
+download it. Neither was reachable by any test worth writing.
+
+There is no tidy lesson. The tests were good ones -- each mutation of the code
+they covered kills at least one of them -- and they were all reasoning about
+the shapes that had already been imagined. A day of running reasoned about the
+ones that had not.
 
 ## Roadmap
 
