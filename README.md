@@ -182,7 +182,8 @@ web UI above answers the question those cannot: what is happening *right now*.
 [production guide](docs/DEPLOYMENT.md)
 
 **Background**
-[how a stream gets to a viewer, and where it breaks](docs/STREAMING.md)
+[how a stream gets to a viewer, and where it breaks](docs/STREAMING.md) ·
+[decisions, and the four that were wrong first](docs/DECISIONS.md)
 
 **About**
 [architecture](#architecture) ·
@@ -1366,6 +1367,9 @@ Packages: `hls` and `dash` (manifest parsers), `probe` (prober + checks),
   checks (freeze, PDT progression) work without external storage for the MVP.
   It was keyed by playlist alone until a soak found what that does when two
   targets watch one stream -- see [below](#what-running-it-for-a-day-found).
+
+Each of these, and the ones that were wrong the first time, is written up with
+its cost and what would change it in [**decisions**](docs/DECISIONS.md).
 
 ## What running it for a day found
 
