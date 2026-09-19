@@ -66,15 +66,27 @@ func lowLatencyChecks(now time.Time, t config.Target, variant string, pl *hls.Me
 	// specification requires at least three part durations, and the reason is
 	// concrete: at less than that a player is playing content whose successor
 	// may not be published yet, and it stalls at the edge on every jitter.
+	//
+	// The specification is precise about the two bars here, and so is this:
+	// PART-HOLD-BACK MUST be at least twice PART-TARGET, and it is RECOMMENDED
+	// to be at least three times. A real packager sitting between the two --
+	// mediamtx publishes 0.5s against a 0.2s target, which is 2.5 -- is
+	// compliant, and calling that a warning reported a correct stream as
+	// broken the first time this met one.
 	switch {
 	case sc.PartHoldBack <= 0 && pl.PartTarget > 0:
 		out = append(out, finding(now, t, variant, alert.Warning, "part_hold_back_missing",
 			"playlist publishes parts but declares no PART-HOLD-BACK, so players "+
 				"have nothing to tell them how close to the edge is safe"))
-	case pl.PartTarget > 0 && sc.PartHoldBack > 0 && sc.PartHoldBack < 3*pl.PartTarget:
+	case pl.PartTarget > 0 && sc.PartHoldBack > 0 && sc.PartHoldBack < 2*pl.PartTarget:
 		out = append(out, finding(now, t, variant, alert.Warning, "part_hold_back_too_small",
-			"PART-HOLD-BACK "+ftoa(sc.PartHoldBack)+"s is below the three part durations "+
-				"the spec requires ("+ftoa(3*pl.PartTarget)+"s): players will stall at the edge"))
+			"PART-HOLD-BACK "+ftoa(sc.PartHoldBack)+"s is below the two part durations the "+
+				"spec requires ("+ftoa(2*pl.PartTarget)+"s): players will stall at the edge"))
+	case pl.PartTarget > 0 && sc.PartHoldBack > 0 && sc.PartHoldBack < 3*pl.PartTarget:
+		out = append(out, finding(now, t, variant, alert.Info, "part_hold_back_below_recommended",
+			"PART-HOLD-BACK "+ftoa(sc.PartHoldBack)+"s meets the required two part durations "+
+				"but is below the three the spec recommends ("+ftoa(3*pl.PartTarget)+
+				"s), which leaves little margin at the edge"))
 	}
 
 	// A player joining a stream, or switching rungs, can only start on a part
@@ -112,9 +124,16 @@ func lowLatencyChecks(now time.Time, t config.Target, variant string, pl *hls.Me
 //
 // The mechanism is the one from the specification: request the playlist with
 // _HLS_msn and _HLS_part naming a part that does not exist yet. A conforming
-// origin holds the response until it does. One that returns at once either
-// ignored the parameters or served a cached copy, and either way the low
-// latency is not there.
+// origin holds the response until it does, and the playlist it returns
+// therefore contains that part.
+//
+// The verdict is taken from the content, not from the clock. Timing alone
+// cannot tell "did not wait" from "did not need to": parts are published every
+// few hundred milliseconds, so between reading the playlist and asking for the
+// next part it may already exist, and a conforming server then answers at once
+// and is right to. Measured against a real low-latency packager this fired on
+// the first poll and was wrong -- the response had the part in it. What the
+// response contains settles it either way.
 func (p *Prober) blockingReloadCheck(ctx context.Context, t config.Target, plURL, variant string,
 	pl *hls.MediaPlaylist) []alert.Finding {
 
@@ -128,12 +147,7 @@ func (p *Prober) blockingReloadCheck(ctx context.Context, t config.Target, plURL
 	msn := pl.MediaSequence + len(pl.Segments)
 	part := len(pl.Parts)
 
-	// fetch measures its own wall-clock duration. Timing this with the
-	// prober's injectable clock would measure nothing: that clock is frozen
-	// under test and does not advance across a real request.
 	res := p.fetch(ctx, t, plURL+blockingQuery(plURL, msn, part))
-	waited := res.dur
-
 	now := p.now().UTC()
 	if res.err != nil || res.status != 200 {
 		// Availability is another check's business. A server that rejects the
@@ -141,20 +155,33 @@ func (p *Prober) blockingReloadCheck(ctx context.Context, t config.Target, plURL
 		// accepts and ignores them, and not one this check should guess at.
 		return nil
 	}
-
-	// A response that arrives in appreciably less than a part duration cannot
-	// have waited for a part that did not exist. Half is the threshold because
-	// a part may already have been in flight when the request arrived, and
-	// reporting a stream that was merely quick would make the check useless.
-	target := time.Duration(pl.PartTarget * float64(time.Second))
-	if waited < target/2 {
-		return []alert.Finding{finding(now, t, variant, alert.Warning, "blocking_reload_missing",
-			"origin declares CAN-BLOCK-RELOAD=YES but answered a request for part "+
-				itoa(part)+" of segment "+itoa(msn)+" in "+ftoa(waited.Seconds())+
-				"s, less than half a part: it is not holding the request, so players "+
-				"must poll and the stream runs at polling latency")}
+	if reached(hls.ParseMedia(res.body), msn, part) {
+		return nil
 	}
-	return nil
+	return []alert.Finding{finding(now, t, variant, alert.Warning, "blocking_reload_missing",
+		"origin declares CAN-BLOCK-RELOAD=YES but answered a request for part "+
+			itoa(part)+" of segment "+itoa(msn)+" in "+ftoa(res.dur.Seconds())+
+			"s with a playlist that does not contain it: it is not holding the "+
+			"request, so players must poll and the stream runs at polling latency")}
+}
+
+// reached reports whether a playlist has got as far as part of segment msn --
+// the question a blocking reload is asking, and the only honest way to tell
+// whether the origin waited.
+func reached(pl *hls.MediaPlaylist, msn, part int) bool {
+	// The segment in production is the one after the last complete segment.
+	inProduction := pl.MediaSequence + len(pl.Segments)
+	switch {
+	case inProduction > msn:
+		// It has gone further: the segment we asked about has completed, which
+		// is past what was requested.
+		return true
+	case inProduction < msn:
+		return false
+	default:
+		// Same segment: the part exists once that many have been published.
+		return len(pl.Parts) > part
+	}
 }
 
 // blockingQuery builds the _HLS_msn / _HLS_part query the specification

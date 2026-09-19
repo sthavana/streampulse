@@ -98,9 +98,10 @@ func TestPartsWithoutBlockingReload(t *testing.T) {
 	}
 }
 
-// The spec requires at least three part durations. Below that a player is
-// playing content whose successor may not exist yet.
-func TestPartHoldBackBelowThreeParts(t *testing.T) {
+// Below two part durations is a spec violation: a player is playing content
+// whose successor may not exist yet.
+func TestPartHoldBackBelowTheRequiredMinimum(t *testing.T) {
+	// 0.5 against a 0.34 target is 1.5 parts.
 	body := strings.Replace(llPlaylist(""), "PART-HOLD-BACK=1.020", "PART-HOLD-BACK=0.500", 1)
 
 	got := llCheck(t, body)
@@ -108,18 +109,38 @@ func TestPartHoldBackBelowThreeParts(t *testing.T) {
 		t.Fatalf("a hold-back of 1.5 parts went unreported: %v", checks(got))
 	}
 	for _, f := range got {
-		if f.Check == "part_hold_back_too_small" && !strings.Contains(f.Message, "1.0s") {
-			t.Errorf("message does not say what the minimum is: %q", f.Message)
+		if f.Check == "part_hold_back_too_small" && f.Severity != alert.Warning {
+			t.Errorf("severity = %s, want warning for a MUST", f.Severity)
 		}
 	}
 }
 
-// Exactly three is compliant, and a check that fires on the boundary fires on
+// Between the required two and the recommended three is compliant. Calling it
+// a warning reported mediamtx -- which publishes 2.5 -- as broken, which is
+// how this distinction got made.
+func TestPartHoldBackBetweenRequiredAndRecommended(t *testing.T) {
+	// 0.85 against a 0.34 target is 2.5 parts.
+	body := strings.Replace(llPlaylist(""), "PART-HOLD-BACK=1.020", "PART-HOLD-BACK=0.850", 1)
+
+	got := llCheck(t, body)
+	if hasCheck(got, "part_hold_back_too_small") {
+		t.Fatalf("a compliant 2.5 part durations was reported as a violation: %v", checks(got))
+	}
+	if !hasCheck(got, "part_hold_back_below_recommended") {
+		t.Fatalf("2.5 parts did not produce the advisory: %v", checks(got))
+	}
+	for _, f := range got {
+		if f.Check == "part_hold_back_below_recommended" && f.Severity != alert.Info {
+			t.Errorf("severity = %s, want info for a RECOMMENDED", f.Severity)
+		}
+	}
+}
+
+// Three is the recommendation, and a check that fires on the boundary fires on
 // every correctly configured stream.
-func TestPartHoldBackOfExactlyThreePartsIsSilent(t *testing.T) {
-	body := strings.Replace(llPlaylist(""), "PART-HOLD-BACK=1.020", "PART-HOLD-BACK=1.020", 1)
-	if got := llCheck(t, body); hasCheck(got, "part_hold_back_too_small") {
-		t.Fatalf("three exact part durations were reported as too small: %v", checks(got))
+func TestPartHoldBackOfThreePartsIsSilent(t *testing.T) {
+	if got := llCheck(t, llPlaylist("")); len(got) != 0 {
+		t.Fatalf("three exact part durations produced findings: %v", checks(got))
 	}
 }
 
@@ -150,20 +171,26 @@ func TestNoIndependentPartIsReported(t *testing.T) {
 
 // --- the behavioural half ---
 
-// llOrigin serves a low-latency playlist. When block is true it holds a
-// request carrying _HLS_msn for the given delay, the way a conforming origin
-// holds one until the part exists.
-func llHLSOrigin(t *testing.T, block bool, delay time.Duration) (*httptest.Server, *int32) {
+// llHLSOrigin serves a low-latency playlist. When honour is true a request
+// carrying _HLS_msn is answered with a playlist that has advanced far enough
+// to contain the part asked for -- which is what a conforming origin does,
+// whether it had to wait to do it or not.
+func llHLSOrigin(t *testing.T, honour bool, delay time.Duration) (*httptest.Server, *int32) {
 	t.Helper()
 	var blocking int32
+	// One more part than the baseline playlist, so a response carrying it
+	// proves the origin got as far as it was asked to.
+	advanced := llPlaylist("") + `#EXT-X-PART:DURATION=0.34000,URI="seg1548.2.m4s"` + "\n"
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body := llPlaylist("")
 		if r.URL.Query().Get("_HLS_msn") != "" {
 			atomic.AddInt32(&blocking, 1)
-			if block {
+			if honour {
 				time.Sleep(delay)
+				body = advanced
 			}
 		}
-		_, _ = w.Write([]byte(llPlaylist("")))
+		_, _ = w.Write([]byte(body))
 	}))
 	return srv, &blocking
 }
@@ -190,7 +217,7 @@ func TestBlockingReloadNotHonoured(t *testing.T) {
 // An origin that does hold the request must be silent, or the check reports
 // every correctly implemented low-latency stream.
 func TestBlockingReloadHonouredIsSilent(t *testing.T) {
-	srv, _ := llHLSOrigin(t, true, 300*time.Millisecond)
+	srv, _ := llHLSOrigin(t, true, 50*time.Millisecond)
 	defer srv.Close()
 
 	pr, _ := newTestProber(time.Now())
@@ -254,5 +281,43 @@ func TestBlockingQueryPreservesAnExistingQueryString(t *testing.T) {
 	}
 	if got := blockingQuery("https://cdn/x.m3u8", 5, 2); got != "?_HLS_msn=5&_HLS_part=2" {
 		t.Errorf("query = %q, want it started with ?", got)
+	}
+}
+
+// The race a real packager exposed. Parts are published every few hundred
+// milliseconds, so between reading the playlist and asking for the next part
+// it can already exist -- and a conforming origin then answers instantly and
+// is right to. An earlier version of this check timed the response and
+// reported exactly that as a failure.
+func TestAnInstantButCompleteAnswerIsNotAFailure(t *testing.T) {
+	srv, _ := llHLSOrigin(t, true, 0) // honours the request, with no delay at all
+	defer srv.Close()
+
+	pr, _ := newTestProber(time.Now())
+	pl := hls.ParseMedia(llPlaylist(""))
+	got := pr.blockingReloadCheck(context.Background(), config.Target{Name: "ll"}, srv.URL+"/m.m3u8", "v", pl)
+
+	if len(got) != 0 {
+		t.Fatalf("an origin that answered at once with the requested part was reported: %v", checks(got))
+	}
+}
+
+// reached is the whole verdict, so it is worth testing directly.
+func TestReachedComparesSegmentAndPart(t *testing.T) {
+	pl := hls.ParseMedia(llPlaylist("")) // msn 1547, one segment, two parts
+	cases := []struct {
+		msn, part int
+		want      bool
+	}{
+		{1548, 0, true},  // part 0 of the segment in production exists
+		{1548, 1, true},  // so does part 1
+		{1548, 2, false}, // part 2 does not yet
+		{1549, 0, false}, // nor has the next segment started
+		{1547, 5, true},  // a segment already complete is past what was asked
+	}
+	for _, c := range cases {
+		if got := reached(pl, c.msn, c.part); got != c.want {
+			t.Errorf("reached(msn=%d, part=%d) = %v, want %v", c.msn, c.part, got, c.want)
+		}
 	}
 }

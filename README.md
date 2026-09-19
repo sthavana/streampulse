@@ -8,7 +8,7 @@
 segments the way a player would, and tells you what is broken before viewers do
 — and *which layer* broke.
 
-68 checks · origin-vs-CDN fault attribution · Prometheus and Grafana · a
+69 checks · origin-vs-CDN fault attribution · Prometheus and Grafana · a
 multiviewer wall · Go standard library only · two static binaries
 
 ![The operator view](docs/screenshot.png)
@@ -26,7 +26,7 @@ the CDN. By then people have already switched off.
 
 StreamPulse probes actively instead, on a tight schedule, from wherever you run
 it. It parses what it gets back the way a player would and reports faults as
-they appear — 68 checks across both formats, deduplicated into incidents
+they appear — 69 checks across both formats, deduplicated into incidents
 so one frozen playlist is one alert rather than 900.
 
 And where it can, it says which layer to look at:
@@ -241,7 +241,8 @@ what it describes.
 | `pssh_malformed` / `pssh_empty` | warning | Embedded PSSH box fails to parse or carries nothing |
 | `part_target_violation` | warning | An `EXT-X-PART` longer than the declared `PART-TARGET` |
 | `part_target_missing` | warning | Parts published with no `EXT-X-PART-INF` |
-| `part_hold_back_too_small` | warning | `PART-HOLD-BACK` below the three part durations the spec requires |
+| `part_hold_back_too_small` | warning | `PART-HOLD-BACK` below the two part durations the spec requires |
+| `part_hold_back_below_recommended` | info | Above the required two part durations, below the recommended three |
 | `part_hold_back_missing` | warning | Parts published with nothing telling players how close to the edge is safe |
 | `blocking_reload_undeclared` | warning | Parts published without `CAN-BLOCK-RELOAD=YES`, so players must poll |
 | `blocking_reload_missing` | warning | The origin declares blocking reload and answers immediately anyway |
@@ -550,17 +551,27 @@ and every player is back to polling, seconds behind where the design says.
 
 The check asks the way the specification says to: request the playlist with
 `_HLS_msn` and `_HLS_part` naming the next part, the first thing that does not
-exist yet. A conforming origin holds the response for most of a part duration.
-One that answers in less than half of one did not wait, and is reported. An
-existing query string is preserved, because token-authenticated origins put one
-there and replacing it would turn this into an authentication failure.
+exist yet. **The verdict comes from what the response contains, not from how
+long it took.** A conforming origin returns a playlist that has the requested
+part in it; one that has not waited returns the playlist it already had.
+
+Timing cannot tell the two apart. Parts are published every few hundred
+milliseconds, so between reading the playlist and asking for the next part it
+may already exist — and a conforming origin then answers instantly and is right
+to. The first version of this check timed the response, and the first real
+packager it met was reported as broken while doing exactly the right thing.
+
+An existing query string is preserved, because token-authenticated origins put
+one there and replacing it would turn this into an authentication failure.
 
 The rest are structural, and all of them are things a player has to act on:
 
-- **`part_hold_back_too_small`** — the spec requires `PART-HOLD-BACK` to be at
-  least three part durations. Below that a player is playing content whose
-  successor may not be published yet, and it stalls at the edge on every
-  jitter.
+- **`part_hold_back_too_small`** — the spec is precise here and so is this.
+  `PART-HOLD-BACK` MUST be at least two part durations, and is RECOMMENDED to
+  be at least three. Below two is a warning; between the two bars is
+  `part_hold_back_below_recommended`, info. The distinction exists because
+  mediamtx publishes 2.5, which is compliant, and the first version of this
+  check called that broken.
 - **`part_target_violation`** — a part longer than the declared `PART-TARGET`,
   with the same 10% tolerance the `TARGETDURATION` check uses, because a few
   milliseconds over a 340ms target is frame arithmetic rather than a fault.
