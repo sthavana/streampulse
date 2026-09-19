@@ -18,6 +18,7 @@ package main
 import (
 	"context"
 	"flag"
+	"fmt"
 	"log"
 	"net/http"
 	"os"
@@ -25,6 +26,7 @@ import (
 	"syscall"
 	"time"
 
+	"streampulse/internal/buildinfo"
 	"streampulse/internal/mosaic"
 )
 
@@ -37,7 +39,14 @@ func main() {
 	width := flag.Int("width", 320, "thumbnail width in pixels; height follows the aspect ratio")
 	quality := flag.Int("quality", 7, "JPEG quality, 2 (best) to 31 (worst)")
 	ffmpegPath := flag.String("ffmpeg", "ffmpeg", "path to the ffmpeg binary")
+	showVersion := flag.Bool("version", false, "print the version and exit")
 	flag.Parse()
+
+	if *showVersion {
+		fmt.Println(buildinfo.String("mosaic"))
+		return
+	}
+	log.Print(buildinfo.String("mosaic"))
 
 	store := mosaic.New()
 

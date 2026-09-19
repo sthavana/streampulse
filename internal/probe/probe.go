@@ -6,6 +6,7 @@ package probe
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"net/http"
 	"net/url"
@@ -369,6 +370,11 @@ type fetchResult struct {
 	err    error
 }
 
+// maxManifestBytes caps a manifest read. Generous by an order of magnitude
+// against any real playlist or MPD, and small enough that a target cannot cost
+// more than this much memory per poll.
+const maxManifestBytes = 8 << 20
+
 func (p *Prober) fetch(ctx context.Context, t config.Target, u string) fetchResult {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
 	if err != nil {
@@ -382,7 +388,24 @@ func (p *Prober) fetch(ctx context.Context, t config.Target, u string) fetchResu
 		return fetchResult{dur: time.Since(start), err: err}
 	}
 	defer resp.Body.Close()
-	b, err := io.ReadAll(resp.Body)
+	// Bounded. A manifest is a text document about one stream: the largest
+	// plausible one is a multi-hour DVR playlist listing tens of thousands of
+	// segments, which is a few megabytes. An unbounded read here means a
+	// misconfigured target, a hostile origin, or a proxy streaming something
+	// endless can grow this process without limit -- and a monitoring tool
+	// that can be made to exhaust its own memory by the thing it is watching
+	// has the failure mode exactly backwards.
+	b, err := io.ReadAll(io.LimitReader(resp.Body, maxManifestBytes))
+	if err == nil && int64(len(b)) == maxManifestBytes {
+		// Truncated at the cap: the parse that follows would fail somewhere
+		// arbitrary, so say what actually happened instead.
+		return fetchResult{
+			status: resp.StatusCode,
+			dur:    time.Since(start),
+			cache:  readCache(resp.Header),
+			err:    fmt.Errorf("manifest exceeds %dMB; refusing to read more", maxManifestBytes>>20),
+		}
+	}
 	return fetchResult{
 		body:   string(b),
 		status: resp.StatusCode,

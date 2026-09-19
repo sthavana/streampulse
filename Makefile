@@ -1,8 +1,14 @@
 .PHONY: build run test vet fmt check check-linux docker docker-full docker-mosaic compose-up compose-up-full compose-down clean
 
+# VERSION is stamped into the binaries so they can say what they are. An
+# ordinary local build leaves it unset and reports dev plus the git revision,
+# which is the honest answer for a binary built from a working tree.
+VERSION ?=
+LDFLAGS := $(if $(VERSION),-X streampulse/internal/buildinfo.version=$(VERSION),)
+
 build:
-	go build -o bin/prober ./cmd/prober
-	go build -o bin/mosaic ./cmd/mosaic
+	go build -ldflags "$(LDFLAGS)" -o bin/prober ./cmd/prober
+	go build -ldflags "$(LDFLAGS)" -o bin/mosaic ./cmd/mosaic
 
 run: build
 	./bin/prober -config config.json

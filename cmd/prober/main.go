@@ -8,6 +8,7 @@ package main
 import (
 	"context"
 	"flag"
+	"fmt"
 	"log"
 	"net/http"
 	"os"
@@ -22,6 +23,7 @@ import (
 	_ "time/tzdata"
 
 	"streampulse/internal/alert"
+	"streampulse/internal/buildinfo"
 	"streampulse/internal/config"
 	"streampulse/internal/inspect"
 	"streampulse/internal/metrics"
@@ -32,7 +34,16 @@ import (
 
 func main() {
 	cfgPath := flag.String("config", "config.json", "path to config file")
+	showVersion := flag.Bool("version", false, "print the version and exit")
 	flag.Parse()
+
+	if *showVersion {
+		fmt.Println(buildinfo.String("streampulse"))
+		return
+	}
+	// Logged before anything else can go wrong, so it is in the log of every
+	// run that produced a surprising finding.
+	log.Print(buildinfo.String("streampulse"))
 
 	cfg, err := config.Load(*cfgPath)
 	if err != nil {
@@ -124,6 +135,10 @@ func main() {
 	mux.Handle("/", web.Handler(web.Sources{
 		Registry: reg, Tracker: tracker, Recorder: recorder, Frames: pr.Frames(),
 		Vantage: cfg.Vantage,
+		// The API has carried a version field since the UI was written and
+		// nothing ever filled it in. Now something can: an operator reading
+		// /api/state can tell which build produced the answer.
+		Version: buildinfo.Version(),
 		Targets: sup.Targets,
 		Started: time.Now(),
 	}))

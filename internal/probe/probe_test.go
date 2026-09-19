@@ -1,12 +1,16 @@
 package probe
 
 import (
+	"bytes"
 	"context"
+	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"streampulse/internal/alert"
 	"streampulse/internal/config"
@@ -346,5 +350,60 @@ func TestMasterTargetFetchCountUnchanged(t *testing.T) {
 	}
 	if master != 1 || media != 1 {
 		t.Errorf("fetched master %d times and media %d times, want 1 and 1", master, media)
+	}
+}
+
+// A monitoring tool that can be made to exhaust its own memory by the thing it
+// is watching has the failure mode backwards. An origin streaming something
+// endless -- or a proxy that never closes -- must cost one bounded read.
+func TestAnEndlessManifestIsCutOff(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/vnd.apple.mpegurl")
+		chunk := bytes.Repeat([]byte("#EXTINF:4.000,\nseg.ts\n"), 4096)
+		for i := 0; i < 4096; i++ { // far more than the cap, if it were unbounded
+			if _, err := w.Write(chunk); err != nil {
+				return
+			}
+		}
+	}))
+	defer srv.Close()
+
+	pr, _ := newTestProber(time.Now())
+	cap := &capture{}
+	pr.notifier = cap
+	pr.ProbeTarget(context.Background(), config.Target{Name: "endless", URL: srv.URL + "/x.m3u8"})
+
+	f, ok := cap.find("manifest_fetch")
+	if !ok {
+		t.Fatalf("an oversized manifest was accepted: %+v", cap.findings)
+	}
+	if !strings.Contains(f.Message, "exceeds") {
+		t.Errorf("message does not say what happened: %q", f.Message)
+	}
+}
+
+// The cap must not truncate anything real. A long DVR playlist is the biggest
+// legitimate manifest there is, and it must parse normally.
+func TestALongPlaylistIsNotTruncated(t *testing.T) {
+	var b strings.Builder
+	b.WriteString("#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:4\n#EXT-X-MEDIA-SEQUENCE:0\n")
+	// Six hours of 4s segments: 5,400 entries, which is a real DVR window.
+	for i := 0; i < 5400; i++ {
+		fmt.Fprintf(&b, "#EXTINF:4.000,\nseg%d.ts\n", i)
+	}
+	body := b.String()
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.WriteString(w, body)
+	}))
+	defer srv.Close()
+
+	pr, _ := newTestProber(time.Now())
+	cap := &capture{}
+	pr.notifier = cap
+	pr.ProbeTarget(context.Background(), config.Target{Name: "dvr", URL: srv.URL + "/x.m3u8"})
+
+	if f, ok := cap.find("manifest_fetch"); ok {
+		t.Fatalf("a %d-byte DVR playlist was rejected: %q", len(body), f.Message)
 	}
 }

@@ -119,6 +119,12 @@ make check         # gofmt, go vet, and the tests under -race
 make check-linux   # the same suite on Linux, where CI runs it
 ```
 
+Prebuilt binaries for linux and darwin, amd64 and arm64, are attached to every
+[release](https://github.com/sthavana/streampulse/releases) with a
+`SHA256SUMS` alongside. Both binaries take `-version`, and the prober reports
+the same string in `/api/state` — a build that cannot say what it is asks its
+operator to take the findings on trust.
+
 `check-linux` exists because the difference has bitten twice: CI runs on
 Linux, where `/bin/sh` is dash and a killed process's children keep its pipes
 open, and both times a macOS run reported everything green.
@@ -183,7 +189,8 @@ web UI above answers the question those cannot: what is happening *right now*.
 
 **Background**
 [how a stream gets to a viewer, and where it breaks](docs/STREAMING.md) ·
-[decisions, and the four that were wrong first](docs/DECISIONS.md)
+[decisions, and the four that were wrong first](docs/DECISIONS.md) ·
+[HTTP API](docs/API.md) · [security](SECURITY.md)
 
 **About**
 [architecture](#architecture) ·
