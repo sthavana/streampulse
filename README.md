@@ -8,7 +8,7 @@
 segments the way a player would, and tells you what is broken before viewers do
 — and *which layer* broke.
 
-61 checks · origin-vs-CDN fault attribution · Prometheus and Grafana · a
+68 checks · origin-vs-CDN fault attribution · Prometheus and Grafana · a
 multiviewer wall · Go standard library only · two static binaries
 
 ![The operator view](docs/screenshot.png)
@@ -26,7 +26,7 @@ the CDN. By then people have already switched off.
 
 StreamPulse probes actively instead, on a tight schedule, from wherever you run
 it. It parses what it gets back the way a player would and reports faults as
-they appear — 61 checks across both formats, deduplicated into incidents
+they appear — 68 checks across both formats, deduplicated into incidents
 so one frozen playlist is one alert rather than 900.
 
 And where it can, it says which layer to look at:
@@ -137,7 +137,7 @@ open, and both times a macOS run reported everything green.
 | **Liveness** | frozen live edges, timelines going backwards, less DVR than the manifest promises, edges drifting behind wall clock |
 | **Structure** | spec violations, dangling rendition groups and DASH dependencies, missing initialisation sections, empty playlists and adaptation sets, holes and overlaps in a DASH timeline or at a period boundary |
 | **DRM** | unretrievable keys, clear segments on an encrypted stream, malformed PSSH, keys that stopped rotating |
-| **Low latency** | chunked delivery silently degraded to whole-segment buffering, latency past the declared bound |
+| **Low latency** | both formats: LL-HLS parts, hold-back and blocking reload actually being honoured; LL-DASH chunked delivery silently degraded to whole-segment buffering |
 | **The media itself** | codec and resolution that disagree with the manifest, declared tracks that are not there, black or frozen video, silent audio; a picture and level per stream *(optional, needs ffprobe/ffmpeg)* |
 | **Transport streams** | TR 101 290 P1: sync loss, transport errors, continuity breaks, missing PAT/PMT *(no dependency)* |
 | **Which layer** | origin versus CDN edge, from the cache headers on the response |
@@ -239,6 +239,13 @@ what it describes.
 | `key_invalid_iv` | warning | `IV` is not `0x` + 32 hex digits |
 | `key_rotation_stalled` | warning | Key unchanged for longer than the expected rotation interval |
 | `pssh_malformed` / `pssh_empty` | warning | Embedded PSSH box fails to parse or carries nothing |
+| `part_target_violation` | warning | An `EXT-X-PART` longer than the declared `PART-TARGET` |
+| `part_target_missing` | warning | Parts published with no `EXT-X-PART-INF` |
+| `part_hold_back_too_small` | warning | `PART-HOLD-BACK` below the three part durations the spec requires |
+| `part_hold_back_missing` | warning | Parts published with nothing telling players how close to the edge is safe |
+| `blocking_reload_undeclared` | warning | Parts published without `CAN-BLOCK-RELOAD=YES`, so players must poll |
+| `blocking_reload_missing` | warning | The origin declares blocking reload and answers immediately anyway |
+| `no_independent_part` | info | No published part starts on an IDR, so a joining player waits for the next segment |
 | `discontinuity_present` | info | Discontinuity markers in window (ad-break awareness) |
 | `codec_mismatch` | warning | The media carries a different codec from the one declared |
 | `resolution_mismatch` | warning | The media is a different resolution from the one declared |
@@ -478,6 +485,9 @@ as a deliberate decision rather than done quietly.
 
 ### Low latency
 
+Both formats, by different mechanisms. This section is the DASH half; the HLS
+half is [below](#low-latency-hls).
+
 A chunked low-latency stream declares itself two ways, and either is enough
 because packagers are inconsistent about which they emit: a
 `ServiceDescription/Latency` target, or a `SegmentTemplate` with
@@ -519,6 +529,54 @@ of client drift is the entire budget. An ordinary stream has seconds of buffer
 to absorb the same drift.
 
 Exported as `streampulse_chunked_delivery`.
+
+### Low latency (HLS)
+
+LL-HLS solves the same problem by a different mechanism, so it gets different
+checks. Instead of one segment delivered in chunks over a held-open response,
+the segment in production is published as a series of small complete parts --
+`EXT-X-PART` -- and the player is told about the next one before it exists.
+
+The DASH `chunked_delivery_missing` test is therefore meaningless here: every
+part legitimately has a `Content-Length`, because every part is a finished
+object. What replaces it is a behavioural check of the other half of the
+mechanism.
+
+**`blocking_reload_missing` is the one worth having.** An origin advertising
+`CAN-BLOCK-RELOAD=YES` promises to hold a playlist request open until the part
+you asked for exists. One that advertises it and answers immediately has broken
+nothing visible -- the playlist is valid, every part serves, players play --
+and every player is back to polling, seconds behind where the design says.
+
+The check asks the way the specification says to: request the playlist with
+`_HLS_msn` and `_HLS_part` naming the next part, the first thing that does not
+exist yet. A conforming origin holds the response for most of a part duration.
+One that answers in less than half of one did not wait, and is reported. An
+existing query string is preserved, because token-authenticated origins put one
+there and replacing it would turn this into an authentication failure.
+
+The rest are structural, and all of them are things a player has to act on:
+
+- **`part_hold_back_too_small`** — the spec requires `PART-HOLD-BACK` to be at
+  least three part durations. Below that a player is playing content whose
+  successor may not be published yet, and it stalls at the edge on every
+  jitter.
+- **`part_target_violation`** — a part longer than the declared `PART-TARGET`,
+  with the same 10% tolerance the `TARGETDURATION` check uses, because a few
+  milliseconds over a 340ms target is frame arithmetic rather than a fault.
+- **`blocking_reload_undeclared`** — parts published without offering blocking
+  reload, which is half the mechanism and none of the benefit.
+- **`no_independent_part`** — info, not warning. A player can only join, or
+  switch rungs, on a part that starts with an IDR. A window without one costs a
+  join; it does not break playback.
+
+Parts also correct the live edge. A playlist with three 340ms parts published
+has an edge a second later than its last complete segment, and measuring to the
+segment would report a second of phantom lag -- more than the entire latency
+budget these streams are built for.
+
+Delta playlists (`EXT-X-SKIP`) are parsed so that a short segment list is not
+mistaken for a collapsed DVR window.
 
 ### DRM
 
@@ -1216,6 +1274,7 @@ past six tiles wants HTTP/2, which means putting it behind TLS. The
 `streampulse_segment_available`, `streampulse_segment_ttfb_seconds`,
 `streampulse_variant_count`, `streampulse_rendition_count`,
 `streampulse_period_count`, `streampulse_representation_count`,
+`streampulse_low_latency`, `streampulse_part_target_seconds`,
 `streampulse_timeline_breaks`,
 `streampulse_findings_total`,
 `streampulse_key_count`, `streampulse_key_available`,

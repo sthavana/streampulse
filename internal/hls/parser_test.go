@@ -295,3 +295,113 @@ func TestDistinctMaps(t *testing.T) {
 		t.Errorf("got %d distinct maps, want 3: %+v", got, pl.DistinctMaps())
 	}
 }
+
+// --- low latency ---
+
+const llMedia = `#EXTM3U
+#EXT-X-VERSION:9
+#EXT-X-TARGETDURATION:4
+#EXT-X-MEDIA-SEQUENCE:1547
+#EXT-X-SERVER-CONTROL:CAN-BLOCK-RELOAD=YES,PART-HOLD-BACK=1.020,CAN-SKIP-UNTIL=24.0
+#EXT-X-PART-INF:PART-TARGET=0.34000
+#EXT-X-MAP:URI="init.mp4"
+#EXTINF:4.00000,
+seg1547.m4s
+#EXT-X-PART:DURATION=0.34000,URI="seg1548.0.m4s",INDEPENDENT=YES
+#EXT-X-PART:DURATION=0.34000,URI="seg1548.1.m4s"
+#EXT-X-PART:DURATION=0.33000,URI="seg1548.2.m4s"
+#EXT-X-PRELOAD-HINT:TYPE=PART,URI="seg1548.3.m4s"
+`
+
+func TestParsesLowLatencyTags(t *testing.T) {
+	pl := ParseMedia(llMedia)
+
+	if !pl.LowLatency() {
+		t.Fatal("a playlist publishing parts is not recognised as low latency")
+	}
+	if pl.PartTarget != 0.34 {
+		t.Errorf("PartTarget = %v, want 0.34", pl.PartTarget)
+	}
+	sc := pl.ServerControl
+	if !sc.Present || !sc.CanBlockReload {
+		t.Errorf("server control = %+v, want blocking reload declared", sc)
+	}
+	if sc.PartHoldBack != 1.02 || sc.CanSkipUntil != 24 {
+		t.Errorf("server control = %+v", sc)
+	}
+	if len(pl.PreloadHints) != 1 || pl.PreloadHints[0].Type != "PART" ||
+		pl.PreloadHints[0].URI != "seg1548.3.m4s" {
+		t.Errorf("preload hints = %+v", pl.PreloadHints)
+	}
+}
+
+// Only the parts of the segment still in production describe the live edge.
+// Parts of a segment that has since been published are history, and counting
+// them would put the edge in the wrong place.
+func TestOnlyTrailingPartsAreKept(t *testing.T) {
+	pl := ParseMedia(`#EXTM3U
+#EXT-X-TARGETDURATION:4
+#EXT-X-PART-INF:PART-TARGET=0.34000
+#EXT-X-PART:DURATION=0.34000,URI="a.0.m4s"
+#EXT-X-PART:DURATION=0.34000,URI="a.1.m4s"
+#EXTINF:4.00000,
+a.m4s
+#EXT-X-PART:DURATION=0.34000,URI="b.0.m4s"
+#EXT-X-PART:DURATION=0.30000,URI="b.1.m4s"
+`)
+	if len(pl.Parts) != 2 {
+		t.Fatalf("parts = %+v, want only the two belonging to the segment in production", pl.Parts)
+	}
+	if pl.Parts[0].URI != "b.0.m4s" {
+		t.Errorf("first trailing part = %q, want b.0.m4s", pl.Parts[0].URI)
+	}
+	if got := pl.PartDuration(); got < 0.63 || got > 0.65 {
+		t.Errorf("PartDuration = %v, want 0.64", got)
+	}
+}
+
+func TestPartAttributesAreRead(t *testing.T) {
+	pl := ParseMedia(`#EXTM3U
+#EXT-X-PART-INF:PART-TARGET=0.5
+#EXT-X-PART:DURATION=0.5,URI="p0.m4s",INDEPENDENT=YES
+#EXT-X-PART:DURATION=0.5,URI="p1.m4s",GAP=YES
+`)
+	if len(pl.Parts) != 2 {
+		t.Fatalf("parts = %d", len(pl.Parts))
+	}
+	if !pl.Parts[0].Independent {
+		t.Error("INDEPENDENT=YES not read; a player can only join on one of these")
+	}
+	if !pl.Parts[1].Gap {
+		t.Error("GAP=YES not read; the packager is saying not to request it")
+	}
+}
+
+// A delta playlist says how much it left out. Without reading that, its short
+// segment list looks like a collapsed DVR window.
+func TestDeltaPlaylistSkipCountIsRead(t *testing.T) {
+	pl := ParseMedia(`#EXTM3U
+#EXT-X-TARGETDURATION:4
+#EXT-X-SKIP:SKIPPED-SEGMENTS=120
+#EXTINF:4.00000,
+seg.m4s
+`)
+	if pl.SkippedSegments != 120 {
+		t.Errorf("SkippedSegments = %d, want 120", pl.SkippedSegments)
+	}
+}
+
+// An ordinary playlist must not be mistaken for a low-latency one.
+func TestOrdinaryPlaylistIsNotLowLatency(t *testing.T) {
+	pl := ParseMedia(`#EXTM3U
+#EXT-X-TARGETDURATION:6
+#EXTINF:6.00000,
+seg.ts
+`)
+	if pl.LowLatency() {
+		t.Error("a playlist with no parts was called low latency")
+	}
+	if pl.PartDuration() != 0 {
+		t.Errorf("PartDuration = %v on a playlist with no parts", pl.PartDuration())
+	}
+}

@@ -37,6 +37,8 @@ func (p *Prober) runChecks(t config.Target, plURL, variant string, pl *hls.Media
 		}
 	}
 
+	out = append(out, lowLatencyChecks(now, t, variant, pl)...)
+
 	// --- TARGETDURATION compliance (RFC 8216 4.3.3.1: no segment may exceed it) ---
 	if pl.TargetDuration > 0 {
 		for _, s := range pl.Segments {

@@ -606,10 +606,21 @@ source every viewer is guessing from their own device clock.
 | Players stall at the edge then recover | Playing too close to the edge; `PART-HOLD-BACK` too small or ignored |
 | Works direct from origin, not via CDN | The CDN is not configured to pass through chunked responses |
 
-**StreamPulse:** `chunked_delivery_missing` (the `Content-Length` tell, run
-against a segment that is genuinely still in production), `utc_timing_missing`,
-and `edge_stale` measured from segment completion rather than availability — so
-a low-latency stream is not flattered by its own `@availabilityTimeOffset`.
+**StreamPulse, DASH:** `chunked_delivery_missing` (the `Content-Length` tell,
+run against a segment that is genuinely still in production),
+`utc_timing_missing`, and `edge_stale` measured from segment completion rather
+than availability — so a low-latency stream is not flattered by its own
+`@availabilityTimeOffset`.
+
+**StreamPulse, HLS:** `blocking_reload_missing` asks the origin for a part that
+does not exist yet, using `_HLS_msn` and `_HLS_part`, and reports one that
+answers immediately rather than holding the request — the same fault as
+whole-segment buffering, reached by the other mechanism. Alongside it,
+`part_hold_back_too_small`, `part_target_violation`,
+`blocking_reload_undeclared` and `no_independent_part` check that the
+declarations are consistent with each other, and published parts are counted
+into the live edge so a part-publishing stream is not reported as a segment
+behind.
 
 ---
 
@@ -770,7 +781,7 @@ checks, which catch the same class of arithmetic error inside a period.
 | Origin | Storage purge | DVR shorter than promised | `window_below_declared`, `short_window` |
 | CDN | Stale edge | Manifest frozen — **identical to a dead packager** | `Age` ≥ freeze duration; `X-Cache: STALE` |
 | CDN | Manifest TTL too long | Stream advances in jumps | `manifest_age_seconds` climbing on a live stream |
-| CDN | Whole-segment buffering | Latency far above target, nothing else wrong | `chunked_delivery_missing` |
+| CDN | Whole-segment buffering | Latency far above target, nothing else wrong | `chunked_delivery_missing` (DASH), `blocking_reload_missing` (HLS) |
 | CDN | Missing object | One segment 404s, others fine | `segment_availability` |
 | Manifest | Structurally wrong | Plays on most devices, fails on some | the structural checks in [§4](#4-hls) and [§5](#5-dash) |
 

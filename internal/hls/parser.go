@@ -151,6 +151,50 @@ type Segment struct {
 	Map             *Map
 }
 
+// Part is one EXT-X-PART: a piece of a segment that is still being produced.
+//
+// Low-latency HLS works by publishing these before the segment they belong to
+// is finished, so a player can start decoding a segment that does not fully
+// exist yet. They are ordinary complete resources -- unlike the chunks of a
+// low-latency DASH segment, which arrive inside one chunked response.
+type Part struct {
+	URI      string
+	Duration float64
+	// Independent marks a part that starts with an IDR frame, which is the
+	// only kind a player can join or switch rungs on.
+	Independent bool
+	ByteRange   string
+	// Gap marks a part the packager says is missing. It is a statement, not a
+	// fault to discover: the server is telling players not to request it.
+	Gap bool
+}
+
+// ServerControl is EXT-X-SERVER-CONTROL, which states what the origin will do
+// for a low-latency client.
+type ServerControl struct {
+	// CanBlockReload is the important one. Without it a player must poll for
+	// playlist updates, and polling is the latency low-latency HLS exists to
+	// remove.
+	CanBlockReload bool
+	// PartHoldBack is how close to the live edge a player may play, in
+	// seconds. The specification requires at least three part durations.
+	PartHoldBack float64
+	HoldBack     float64
+	// CanSkipUntil enables delta playlists: a client may ask for only the
+	// changed tail rather than a full DVR window every part interval.
+	CanSkipUntil float64
+	Present      bool
+}
+
+// PreloadHint is EXT-X-PRELOAD-HINT: a resource that does not exist yet. A
+// player requests it and a conforming origin holds the response open until it
+// does, which is how the next part arrives the instant it is produced.
+type PreloadHint struct {
+	Type      string // "PART" or "MAP"
+	URI       string
+	ByteRange string
+}
+
 // MediaPlaylist is the parsed media (variant) playlist.
 type MediaPlaylist struct {
 	Version        int
@@ -158,6 +202,20 @@ type MediaPlaylist struct {
 	MediaSequence  int
 	EndList        bool
 	Segments       []Segment
+	// PartTarget is EXT-X-PART-INF:PART-TARGET, the maximum part duration.
+	// Zero when the playlist declares no parts.
+	PartTarget float64
+	// Parts are the trailing parts of the segment currently being produced,
+	// in the order published. Parts belonging to segments that have since
+	// completed are not kept: they are history, and the live edge is what
+	// these are for.
+	Parts []Part
+	// SkippedSegments is EXT-X-SKIP:SKIPPED-SEGMENTS -- non-zero means this
+	// is a delta playlist and the segments before the skip are absent by
+	// request rather than missing.
+	SkippedSegments int
+	ServerControl   ServerControl
+	PreloadHints    []PreloadHint
 	// Keys holds every EXT-X-KEY tag in the order it appeared, including
 	// METHOD=NONE tags, which are meaningful: they mark a return to clear.
 	Keys []Key
@@ -165,6 +223,29 @@ type MediaPlaylist struct {
 	// more than one when the initialisation section changes mid-stream, which
 	// happens at a discontinuity.
 	Maps []Map
+}
+
+// LowLatency reports whether this playlist is published for low-latency
+// playback. Parts are the definition: a playlist that publishes pieces of the
+// segment in production is doing the thing, whatever else it declares.
+func (m *MediaPlaylist) LowLatency() bool {
+	return len(m.Parts) > 0 || m.PartTarget > 0
+}
+
+// PartDuration is the total length of the trailing parts, which is how far
+// past the last complete segment the live edge actually is.
+//
+// It matters for every staleness measurement on a low-latency stream. A
+// playlist with three 340ms parts published has an edge a second later than
+// its last complete segment, and measuring to the segment would report a
+// second of phantom lag on a perfectly healthy stream -- more than the entire
+// latency budget these streams are built for.
+func (m *MediaPlaylist) PartDuration() float64 {
+	var total float64
+	for _, p := range m.Parts {
+		total += p.Duration
+	}
+	return total
 }
 
 // DistinctMaps returns the unique initialisation sections the playlist
@@ -317,6 +398,10 @@ func ParseMedia(raw string) *MediaPlaylist {
 		currentKey *Key
 		// EXT-X-MAP works the same way, minus the clearing form.
 		currentMap *Map
+		// Parts accumulate until the segment they belong to is published,
+		// then are discarded: once the segment exists, its parts are history
+		// and the trailing ones are what describe the live edge.
+		parts []Part
 	)
 	for _, line := range strings.Split(raw, "\n") {
 		line = strings.TrimSpace(line)
@@ -349,6 +434,36 @@ func ParseMedia(raw string) *MediaPlaylist {
 			currentMap = &mc
 		case line == "#EXT-X-DISCONTINUITY":
 			pendingDisc = true
+		case strings.HasPrefix(line, "#EXT-X-PART-INF:"):
+			attrs := parseAttributes(strings.TrimPrefix(line, "#EXT-X-PART-INF:"))
+			pl.PartTarget = atofSafe(attrs["PART-TARGET"])
+		case strings.HasPrefix(line, "#EXT-X-SERVER-CONTROL:"):
+			attrs := parseAttributes(strings.TrimPrefix(line, "#EXT-X-SERVER-CONTROL:"))
+			pl.ServerControl = ServerControl{
+				Present:        true,
+				CanBlockReload: strings.EqualFold(attrs["CAN-BLOCK-RELOAD"], "YES"),
+				PartHoldBack:   atofSafe(attrs["PART-HOLD-BACK"]),
+				HoldBack:       atofSafe(attrs["HOLD-BACK"]),
+				CanSkipUntil:   atofSafe(attrs["CAN-SKIP-UNTIL"]),
+			}
+		case strings.HasPrefix(line, "#EXT-X-PART:"):
+			attrs := parseAttributes(strings.TrimPrefix(line, "#EXT-X-PART:"))
+			parts = append(parts, Part{
+				URI:         attrs["URI"],
+				Duration:    atofSafe(attrs["DURATION"]),
+				Independent: strings.EqualFold(attrs["INDEPENDENT"], "YES"),
+				ByteRange:   attrs["BYTERANGE"],
+				Gap:         strings.EqualFold(attrs["GAP"], "YES"),
+			})
+		case strings.HasPrefix(line, "#EXT-X-PRELOAD-HINT:"):
+			attrs := parseAttributes(strings.TrimPrefix(line, "#EXT-X-PRELOAD-HINT:"))
+			pl.PreloadHints = append(pl.PreloadHints, PreloadHint{
+				Type: strings.ToUpper(attrs["TYPE"]), URI: attrs["URI"],
+				ByteRange: attrs["BYTERANGE-START"],
+			})
+		case strings.HasPrefix(line, "#EXT-X-SKIP:"):
+			attrs := parseAttributes(strings.TrimPrefix(line, "#EXT-X-SKIP:"))
+			pl.SkippedSegments = atoiSafe(attrs["SKIPPED-SEGMENTS"])
 		case strings.HasPrefix(line, "#EXT-X-PROGRAM-DATE-TIME:"):
 			if t, err := parsePDT(strings.TrimPrefix(line, "#EXT-X-PROGRAM-DATE-TIME:")); err == nil {
 				pendingPDT = &t
@@ -375,9 +490,15 @@ func ParseMedia(raw string) *MediaPlaylist {
 					Map:             currentMap,
 				})
 				pendingDur, pendingPDT, pendingDisc, haveInf = 0, nil, false, false
+				// The parts seen so far belonged to this now-complete
+				// segment.
+				parts = nil
 			}
 		}
 	}
+	// Whatever parts are left belong to the segment still in production, so
+	// they are the live edge.
+	pl.Parts = parts
 	return pl
 }
 
@@ -419,6 +540,14 @@ func parseAttributes(s string) map[string]string {
 		m[key] = val
 	}
 	return m
+}
+
+func atofSafe(s string) float64 {
+	f, err := strconv.ParseFloat(strings.TrimSpace(s), 64)
+	if err != nil {
+		return 0
+	}
+	return f
 }
 
 func atoiSafe(s string) int {

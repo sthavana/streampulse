@@ -30,6 +30,8 @@ const (
 	helpManifestFetch  = "Time to fetch the top-level manifest"
 	helpSequence       = "Live-edge sequence (EXT-X-MEDIA-SEQUENCE, or the newest DASH segment number)"
 	helpTimelineBreaks = "Holes and overlaps in the fetchable part of a DASH SegmentTimeline"
+	helpLowLatency     = "1 when the stream is published for low-latency playback"
+	helpPartTarget     = "EXT-X-PART-INF:PART-TARGET, the maximum part duration in seconds"
 	helpWindow         = "Length of the live/DVR window in seconds"
 	helpSegmentCount   = "Segments in the current window"
 	helpSegmentUp      = "1 if a sampled segment is fetchable"
@@ -277,6 +279,15 @@ func (p *Prober) checkMedia(ctx context.Context, t config.Target, mediaURL, vari
 	}
 	for _, f := range p.keyChecks(ctx, t, mediaURL, variant, pl) {
 		p.record(f)
+	}
+	// Behavioural rather than structural, so it makes its own request and is
+	// kept out of runChecks with the rest of the parse-only checks.
+	for _, f := range p.blockingReloadCheck(ctx, t, mediaURL, variant, pl) {
+		p.record(f)
+	}
+	p.reg.SetGauge("streampulse_low_latency", helpLowLatency, boolGauge(pl.LowLatency()), labels)
+	if pl.LowLatency() {
+		p.reg.SetGauge("streampulse_part_target_seconds", helpPartTarget, pl.PartTarget, labels)
 	}
 
 	if t.SegmentSample > 0 && len(pl.Segments) > 0 {
