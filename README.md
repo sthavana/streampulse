@@ -8,7 +8,15 @@
 segments the way a player would, and tells you what is broken before viewers do
 — and *which layer* broke.
 
+61 checks · origin-vs-CDN fault attribution · Prometheus and Grafana · a
+multiviewer wall · Go standard library only · two static binaries
+
 ![The operator view](docs/screenshot.png)
+
+New here? [**How a stream gets to a viewer, and where it breaks**](docs/STREAMING.md)
+is the background these checks assume, and
+[**what running it for a day found**](#what-running-it-for-a-day-found) is the
+most honest thing in this repository.
 
 ## The problem
 
@@ -18,7 +26,7 @@ the CDN. By then people have already switched off.
 
 StreamPulse probes actively instead, on a tight schedule, from wherever you run
 it. It parses what it gets back the way a player would and reports faults as
-they appear — 51 checks across both formats, deduplicated into incidents
+they appear — 61 checks across both formats, deduplicated into incidents
 so one frozen playlist is one alert rather than 900.
 
 And where it can, it says which layer to look at:
