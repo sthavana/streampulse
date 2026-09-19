@@ -77,8 +77,27 @@ jobs:
             *) echo "::error::binary reports '$got', expected it to contain $VERSION"; exit 1 ;;
           esac
 
-      - name: Attach to the release
+      # The release is created if it does not already exist, using the
+      # annotated tag's own message as the notes. Pushing a tag is then the
+      # single action that produces a release -- the first version of this
+      # assumed a release was already there and failed on the one thing it
+      # existed to do.
+      - name: Publish
         env:
           GH_TOKEN: ${{ github.token }}
           VERSION: ${{ steps.v.outputs.version }}
-        run: gh release upload "$VERSION" dist/* --clobber --repo "$GITHUB_REPOSITORY"
+        run: |
+          set -euo pipefail
+          if ! gh release view "$VERSION" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            git tag -l --format='%(contents:body)' "$VERSION" > notes.md
+            if [ ! -s notes.md ]; then
+              echo "See the changelog below." > notes.md
+            fi
+            echo "" >> notes.md
+            echo "**Full changelog**: https://github.com/$GITHUB_REPOSITORY/commits/$VERSION" >> notes.md
+            gh release create "$VERSION" \
+              --repo "$GITHUB_REPOSITORY" \
+              --title "$VERSION" \
+              --notes-file notes.md
+          fi
+          gh release upload "$VERSION" dist/* --clobber --repo "$GITHUB_REPOSITORY"
