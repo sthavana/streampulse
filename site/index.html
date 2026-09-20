@@ -1,0 +1,323 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>StreamPulse — which layer broke?</title>
+<meta name="description" content="Synthetic health monitoring for HLS and DASH. 69 checks, origin-vs-CDN fault attribution, and a multiviewer that shows why a tile is red. Go standard library only.">
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><text y='13' font-size='14'>📡</text></svg>">
+
+<meta property="og:title" content="StreamPulse — which layer broke?">
+<meta property="og:description" content="Synthetic health monitoring for HLS and DASH. It tells you whether the packager or the CDN broke.">
+<meta property="og:type" content="website">
+<meta property="og:image" content="https://raw.githubusercontent.com/sthavana/streampulse/main/docs/screenshot-multiviewer.png">
+<meta name="twitter:card" content="summary_large_image">
+
+<!--
+  No framework, no build step, no fonts fetched from anywhere. The project this
+  page is about has no dependencies; it would be a strange thing to advertise
+  from a page that pulled in three hundred kilobytes of JavaScript to say so.
+-->
+<style>
+  :root {
+    --bg: #0b0b0d; --panel: #141417; --line: #26262b;
+    --ink: #e8e8ea; --dim: #9a9aa2; --faint: #6c6c75;
+    --accent: #5b9dff; --ok: #30a46c; --crit: #e5484d; --warn: #f5a623;
+    --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  }
+  * { box-sizing: border-box; }
+  html { scroll-behavior: smooth; }
+  body {
+    margin: 0; background: var(--bg); color: var(--ink);
+    font: 16px/1.6 system-ui, -apple-system, "Segoe UI", sans-serif;
+    -webkit-font-smoothing: antialiased;
+  }
+  a { color: var(--accent); }
+  .wrap { max-width: 1060px; margin: 0 auto; padding: 0 20px; }
+
+  /* --- nav --- */
+  nav { border-bottom: 1px solid var(--line); position: sticky; top: 0;
+        background: rgba(11,11,13,.86); backdrop-filter: blur(8px); z-index: 10; }
+  nav .wrap { display: flex; align-items: center; gap: 22px; height: 58px; }
+  .brand { font-weight: 700; letter-spacing: -.01em; font-size: 17px; color: var(--ink);
+           text-decoration: none; margin-right: auto; }
+  .brand span { color: var(--accent); }
+  nav a.link { color: var(--dim); text-decoration: none; font-size: 14px; }
+  nav a.link:hover { color: var(--ink); }
+
+  /* --- hero --- */
+  header { padding: 76px 0 40px; }
+  h1 { font-size: clamp(34px, 6vw, 56px); line-height: 1.08; margin: 0 0 18px;
+       letter-spacing: -.03em; }
+  h1 .muted { color: var(--faint); display: block; font-size: .56em; font-weight: 600;
+              letter-spacing: -.01em; margin-bottom: 10px; }
+  .lede { font-size: clamp(17px, 2.3vw, 20px); color: var(--dim); max-width: 60ch; margin: 0 0 30px; }
+  .lede strong { color: var(--ink); font-weight: 600; }
+  .cta { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; margin-bottom: 34px; }
+  .btn { display: inline-block; padding: 11px 20px; border-radius: 8px; text-decoration: none;
+         font-size: 15px; font-weight: 600; border: 1px solid var(--line); }
+  .btn.primary { background: var(--accent); border-color: var(--accent); color: #06152e; }
+  .btn.ghost { color: var(--ink); }
+  .btn.ghost:hover { border-color: var(--faint); }
+
+  pre, code { font-family: var(--mono); }
+  pre { background: var(--panel); border: 1px solid var(--line); border-radius: 10px;
+        padding: 16px 18px; overflow-x: auto; font-size: 13.5px; line-height: 1.7; margin: 0; }
+  pre .c { color: var(--faint); }
+  pre .p { color: var(--ok); }
+
+  /* --- shots --- */
+  figure { margin: 0 0 8px; }
+  .shot { width: 100%; display: block; border: 1px solid var(--line); border-radius: 12px; }
+  figcaption { color: var(--faint); font-size: 13.5px; margin-top: 10px; }
+
+  section { padding: 54px 0; border-top: 1px solid var(--line); }
+  h2 { font-size: clamp(22px, 3vw, 30px); letter-spacing: -.02em; margin: 0 0 10px; }
+  .sub { color: var(--dim); max-width: 64ch; margin: 0 0 28px; }
+
+  /* --- stats --- */
+  .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+           gap: 14px; margin: 0; padding: 0; list-style: none; }
+  .stats li { background: var(--panel); border: 1px solid var(--line); border-radius: 10px;
+              padding: 18px; }
+  .stats b { display: block; font-size: 27px; letter-spacing: -.02em; font-family: var(--mono); }
+  .stats span { color: var(--dim); font-size: 13.5px; }
+
+  /* --- cards --- */
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(270px, 1fr)); gap: 16px; }
+  .card { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 20px 22px; }
+  .card h3 { margin: 0 0 8px; font-size: 16px; letter-spacing: -.01em; }
+  .card p { margin: 0; color: var(--dim); font-size: 14.5px; }
+  .card code { color: var(--ink); font-size: 13px; }
+
+  .quote { border-left: 3px solid var(--accent); padding: 4px 0 4px 20px; margin: 26px 0;
+           color: var(--dim); font-size: 16px; }
+  .quote b { color: var(--ink); }
+
+  footer { border-top: 1px solid var(--line); padding: 34px 0 60px; color: var(--faint); font-size: 14px; }
+  footer a { color: var(--dim); }
+  footer .row { display: flex; flex-wrap: wrap; gap: 18px; align-items: center; }
+  footer .row .sp { margin-left: auto; }
+
+  @media (max-width: 640px) {
+    header { padding: 48px 0 28px; }
+    section { padding: 40px 0; }
+    nav .wrap { gap: 14px; }
+    nav a.link.hide-s { display: none; }
+  }
+</style>
+</head>
+<body>
+
+<nav>
+  <div class="wrap">
+    <a class="brand" href="/">Stream<span>Pulse</span></a>
+    <a class="link" href="#what">What it catches</a>
+    <a class="link hide-s" href="#start">Quickstart</a>
+    <a class="link hide-s" href="https://github.com/sthavana/streampulse/blob/main/docs/STREAMING.md">Guide</a>
+    <a class="link" href="https://github.com/sthavana/streampulse">GitHub</a>
+  </div>
+</nav>
+
+<header>
+  <div class="wrap">
+    <h1><span class="muted">When a live stream freezes</span>Which layer broke?</h1>
+    <p class="lede">
+      A packager that has stopped producing and a CDN edge serving a stale copy look
+      <strong>identical from outside</strong> — same bytes, poll after poll. They are
+      different teams and different fixes. StreamPulse tells them apart.
+    </p>
+    <div class="cta">
+      <a class="btn primary" href="#start">Get started</a>
+      <a class="btn ghost" href="https://github.com/sthavana/streampulse">View on GitHub</a>
+      <a class="btn ghost" href="https://github.com/sthavana/streampulse/releases/latest">Download binaries</a>
+    </div>
+    <figure>
+      <img class="shot" src="img/hero.png" alt="The StreamPulse multiviewer: a wall of stream thumbnails, two outlined in red with the reason on the tile, one showing no signal."
+           width="2560" height="440" loading="eager">
+      <figcaption>The multiviewer. Border colour comes from the health checks, not the video — so a
+        VOD clip declared as live shows a flawless picture inside a red border.</figcaption>
+    </figure>
+  </div>
+</header>
+
+<section id="attribution">
+  <div class="wrap">
+    <h2>It names the layer, not just the symptom</h2>
+    <p class="sub">
+      Every manifest finding carries what the cache headers said. The lag is split rather
+      than judged: of the time a stream is behind, the part that is cache age and the part
+      the packager was already behind when it generated that manifest.
+    </p>
+<pre><span class="c"># a real finding</span>
+live edge is 306s behind wall-clock
+  <span class="p">[cache: Age 300s, HIT — the packager was 6s behind when this
+   was generated; the rest is cache age]</span></pre>
+    <p class="quote">
+      A threshold gets this wrong. Comparing <b>Age</b> to the lag calls a 300-second-old
+      manifest behind a 306-second lag “fresher than the freeze” and blames the packager —
+      when 98% of it is the cache. That is what the first version of this check did.
+    </p>
+  </div>
+</section>
+
+<section id="what">
+  <div class="wrap">
+    <h2>69 checks across HLS and DASH</h2>
+    <p class="sub">Each one a named check with a severity and a message that says what to do about it.</p>
+    <div class="grid">
+      <div class="card">
+        <h3>Availability</h3>
+        <p>Manifests and segments that 404, time out, or return something that is not a manifest —
+           including the CDN error page served with a 200.</p>
+      </div>
+      <div class="card">
+        <h3>Liveness</h3>
+        <p>Frozen live edges, timelines going backwards after an origin failover, less DVR than
+           the manifest promises, edges drifting behind wall clock.</p>
+      </div>
+      <div class="card">
+        <h3>Structure</h3>
+        <p>Spec violations, dangling rendition groups, holes at a period boundary where SSAI
+           stitching went wrong, <code>$RepresentationID$</code> collisions.</p>
+      </div>
+      <div class="card">
+        <h3>Low latency</h3>
+        <p>Both formats. Chunked delivery silently degraded to whole-segment buffering, and an
+           LL-HLS origin that promises blocking reload and does not honour it.</p>
+      </div>
+      <div class="card">
+        <h3>DRM</h3>
+        <p>Unretrievable keys, clear segments on a stream declared encrypted, malformed PSSH,
+           keys that quietly stopped rotating.</p>
+      </div>
+      <div class="card">
+        <h3>The media itself</h3>
+        <p>Codec and resolution disagreeing with the manifest, black or frozen video, silent
+           audio. Optional — it shells out to ffprobe.</p>
+      </div>
+      <div class="card">
+        <h3>Transport streams</h3>
+        <p>TR 101 290 Priority 1: sync loss, continuity counter breaks, transport errors,
+           missing PAT/PMT. No TSDuck dependency; it reads the packets directly.</p>
+      </div>
+      <div class="card">
+        <h3>Which region</h3>
+        <p>Run it in several places. The vantage labels every metric and every incident, so two
+           probers do not overwrite each other.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section id="operator">
+  <div class="wrap">
+    <h2>An operator page, and Prometheus underneath</h2>
+    <p class="sub">
+      Findings are deduplicated into incidents and notified on transitions, so one frozen
+      playlist is one alert rather than nine hundred. Everything is on <code>/metrics</code>
+      as well, with alert rules and a Grafana dashboard in the repo.
+    </p>
+    <figure>
+      <img class="shot" src="img/operator.png" alt="The StreamPulse operator page, showing targets with their streams, metrics and sparklines, with a firing target sorted to the top."
+           width="2560" height="1370" loading="lazy">
+      <figcaption>Trouble sorts to the top. Sparklines because 172&nbsp;ms means little on its own and
+        a great deal after a minute at 40&nbsp;ms.</figcaption>
+    </figure>
+  </div>
+</section>
+
+<section id="start">
+  <div class="wrap">
+    <h2>Quickstart</h2>
+    <p class="sub">Docker only. The demo stack brings up the prober, the multiviewer, Prometheus and
+      Grafana against public test streams — two of them broken on purpose, so you can see what a
+      fault looks like.</p>
+<pre>git clone https://github.com/sthavana/streampulse.git
+cd streampulse
+make compose-up-full
+
+<span class="c">operator page   http://localhost:9090
+multiviewer     http://localhost:9092/mosaic
+prometheus      http://localhost:9091
+grafana         http://localhost:3000</span></pre>
+    <p class="sub" style="margin-top:22px">
+      Or take a binary from the
+      <a href="https://github.com/sthavana/streampulse/releases/latest">latest release</a> —
+      linux and darwin, amd64 and arm64, with checksums. No runtime, no dependencies.
+    </p>
+    <ul class="stats">
+      <li><b>69</b><span>named checks</span></li>
+      <li><b>0</b><span>dependencies</span></li>
+      <li><b>10.2 MB</b><span>scratch image</span></li>
+      <li><b>~19 MB</b><span>memory, flat over 28h</span></li>
+    </ul>
+  </div>
+</section>
+
+<section id="honest">
+  <div class="wrap">
+    <h2>What a day of running found</h2>
+    <p class="sub">
+      A monitoring tool's own test suite is the least interesting evidence about it. This one
+      was left running for 28 hours against live streams. Memory flat, threads flat, metric
+      cardinality flat — and seven false positives.
+    </p>
+<pre><span class="c">// cross-poll state was keyed by URL</span>
+func edgeKey(t config.Target, variant string) string {
+    return t.URL + "#" + variant   <span class="c">// two targets, one stream, one entry</span>
+}</pre>
+    <p class="quote">
+      Two targets watching the same stream shared an entry, so the slower one reported the
+      faster one's progress as a rollback. The half that never fired in those 28 hours is worse:
+      <b>a frozen edge reported as a rollback and never as a stall.</b> There were ~9,800 lines
+      of tests, including one named <code>TestEdgeStateIsPerTargetAndRepresentation</code>,
+      which used two targets on <em>different</em> URLs and was perfectly happy.
+    </p>
+    <p class="sub">
+      <a href="https://github.com/sthavana/streampulse#what-running-it-for-a-day-found">The full account</a>,
+      and <a href="https://github.com/sthavana/streampulse/blob/main/docs/DECISIONS.md">fifteen decisions</a>
+      with what each one costs — four of them marked as wrong the first time.
+    </p>
+  </div>
+</section>
+
+<section id="docs">
+  <div class="wrap">
+    <h2>Documentation</h2>
+    <div class="grid">
+      <div class="card">
+        <h3><a href="https://github.com/sthavana/streampulse/blob/main/docs/STREAMING.md">How a stream gets to a viewer</a></h3>
+        <p>The background the checks assume: ABR ladders, packaging, HLS and DASH in detail, low
+           latency in both, origins and CDNs. Every section ends with what breaks there.</p>
+      </div>
+      <div class="card">
+        <h3><a href="https://github.com/sthavana/streampulse/blob/main/docs/DEPLOYMENT.md">Running it in production</a></h3>
+        <p>From clone to first alert: which image, systemd and Kubernetes units, what to bind
+           where, wiring Prometheus and Grafana.</p>
+      </div>
+      <div class="card">
+        <h3><a href="https://github.com/sthavana/streampulse/blob/main/docs/API.md">HTTP API</a></h3>
+        <p>What <code>/api/state</code> promises, and what you may rely on. The multiviewer is a
+           client of it, so it is a contract rather than an implementation detail.</p>
+      </div>
+      <div class="card">
+        <h3><a href="https://github.com/sthavana/streampulse/blob/main/SECURITY.md">Security</a></h3>
+        <p>The threat model, stated plainly: the HTTP servers are unauthenticated by design, and
+           it fetches whatever its config points at.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<footer>
+  <div class="wrap row">
+    <span>MIT licensed. Go standard library only.</span>
+    <span class="sp"><a href="https://github.com/sthavana/streampulse">GitHub</a></span>
+    <span><a href="https://github.com/sthavana/streampulse/releases">Releases</a></span>
+    <span><a href="https://github.com/sthavana/streampulse/issues">Issues</a></span>
+  </div>
+</footer>
+
+</body>
+</html>

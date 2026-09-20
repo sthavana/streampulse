@@ -188,6 +188,7 @@ web UI above answers the question those cannot: what is happening *right now*.
 [production guide](docs/DEPLOYMENT.md)
 
 **Background**
+[landing page](site/) ·
 [how a stream gets to a viewer, and where it breaks](docs/STREAMING.md) ·
 [decisions, and the four that were wrong first](docs/DECISIONS.md) ·
 [HTTP API](docs/API.md) · [security](SECURITY.md)

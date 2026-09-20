@@ -1,4 +1,4 @@
-.PHONY: build run test vet fmt check check-linux docker docker-full docker-mosaic compose-up compose-up-full compose-down clean
+.PHONY: build run test vet fmt check check-linux docker docker-full docker-mosaic site-images compose-up compose-up-full compose-down clean
 
 # VERSION is stamped into the binaries so they can say what they are. An
 # ordinary local build leaves it unset and reports dev plus the git revision,
@@ -59,6 +59,16 @@ compose-up-full:
 
 compose-down:
 	docker compose -f deploy/docker-compose.yml -f deploy/docker-compose.full.yml down
+
+# The landing page's images are crops of the README screenshots: the hero drops
+# the wall's half-empty second row, and the operator shot ends on a card
+# boundary rather than mid-row. Run this after retaking either screenshot.
+# Uses the mosaic image for ffmpeg so it needs nothing installed locally.
+site-images: docker-mosaic
+	docker run --rm -v "$$PWD":/w -w /w --entrypoint ffmpeg streampulse:mosaic -y -loglevel error \
+		-i docs/screenshot-multiviewer.png -vf "crop=2560:440:0:0" site/img/hero.png
+	docker run --rm -v "$$PWD":/w -w /w --entrypoint ffmpeg streampulse:mosaic -y -loglevel error \
+		-i docs/screenshot.png -vf "crop=2560:1370:0:0" site/img/operator.png
 
 clean:
 	rm -rf bin
