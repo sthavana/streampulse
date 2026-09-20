@@ -6,3 +6,5 @@
 # Source archives dropped in by hand while working; the code they carry
 # belongs in the tree, the zip does not.
 *.zip
+.vercel
+.env*

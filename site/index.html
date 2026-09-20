@@ -68,7 +68,13 @@
 
   /* --- shots --- */
   figure { margin: 0 0 8px; }
-  .shot { width: 100%; display: block; border: 1px solid var(--line); border-radius: 12px; }
+  /* height:auto is doing real work here, not tidying. The width and height
+     attributes on the img are presentational hints: without this the height
+     one wins and the picture is squashed into 1370 CSS pixels while the width
+     scales to the column. The attributes stay because they give the browser
+     the aspect ratio up front and stop the page jumping as images load. */
+  .shot { width: 100%; height: auto; display: block;
+          border: 1px solid var(--line); border-radius: 12px; }
   figcaption { color: var(--faint); font-size: 13.5px; margin-top: 10px; }
 
   section { padding: 54px 0; border-top: 1px solid var(--line); }
